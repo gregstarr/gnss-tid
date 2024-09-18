@@ -1,0 +1,12 @@
+dependencies:
+  - python=3.11.*
+  - numpy
+  - scipy
+  - pymap3d
+  - astropy
+  - matplotlib
+  - h5py
+  - cartopy
+  - xarray
+  - metpy
+  - scikit-image
