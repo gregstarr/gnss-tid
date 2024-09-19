@@ -140,3 +140,40 @@ def ecef2spherical(x: ArrayLike, y: ArrayLike, z: ArrayLike):
     lon = np.rad2deg(np.atan2(y, x))
     lat = np.rad2deg(np.asin(z / radius))
     return lat, lon, radius
+
+
+def aer2ipp(az, el, rxp, H=350):
+    """
+    Compute poistion of Ionospheric piercing points (IPPs) at height H [km]
+    for a given mulitdimensional vecotr of azimuth/elevation/rang (aer) and 
+    the receiver position (rxp = [lat, lon, h0]).
+    
+    * Prol, F., et al (2017), COMPARATIVE STUDY OF METHODS FOR CALCULATING 
+    IONOSPHERIC POINTS AND DESCRIBING THE GNSS SIGNAL PATH. 
+    Doi:10.1590/s1982-21702017000400044
+    Web: http://www.scielo.br/scielo.php?script=sci_arttext&pid=S1982-21702017000400669&lng=en&tlng=en
+    """
+    az = np.asarray(az, dtype=np.float32)
+    el = np.asarray(el, dtype=np.float32)
+    rxp = np.asarray(rxp, dtype=np.float32)
+    
+    Req = 6378.137
+    f = 1/298.257223563
+    
+    if len(rxp.shape) == 1:
+        lat0 = rxp[0]
+        lon0 = rxp[1]
+    else:
+        lat0 = rxp[:,0]
+        lon0 = rxp[:,1]
+    
+    R = np.sqrt(Req**2 / (1 + (1/(1-f)**2 -1) * np.sin(np.radians(lat0))**2))
+    
+    psi = (np.pi/2 - np.radians(el)) - np.arcsin(R / (R+H) * np.cos(np.radians(el)))
+    
+    lat = np.arcsin(np.sin(np.radians(lat0)) * np.cos(psi) + \
+                    np.cos(np.radians(lat0)) * np.sin(psi) * np.cos(np.radians(az)))
+    
+    lon = np.radians(lon0) + np.arcsin(np.sin(psi) * np.sin(np.radians(az)) / np.cos(lat))
+    
+    return np.degrees(lat), np.degrees(lon)

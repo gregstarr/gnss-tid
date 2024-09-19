@@ -1,137 +1,18 @@
+import sys
 import pathlib
 from datetime import datetime
 
-import h5py
-import pandas
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import interpolate
 from scipy.stats import binned_statistic_2d
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
-from numpy.typing import ArrayLike
 from skimage import measure
 from skimage.morphology import convex_hull_image
 from skimage import filters
 
-from coords import Local2D
-
-
-def aer2ipp(az, el, rxp, H=350):
-    """
-    Compute poistion of Ionospheric piercing points (IPPs) at height H [km]
-    for a given mulitdimensional vecotr of azimuth/elevation/rang (aer) and 
-    the receiver position (rxp = [lat, lon, h0]).
-    
-    * Prol, F., et al (2017), COMPARATIVE STUDY OF METHODS FOR CALCULATING 
-    IONOSPHERIC POINTS AND DESCRIBING THE GNSS SIGNAL PATH. 
-    Doi:10.1590/s1982-21702017000400044
-    Web: http://www.scielo.br/scielo.php?script=sci_arttext&pid=S1982-21702017000400669&lng=en&tlng=en
-    """
-    az = np.asarray(az, dtype=np.float32)
-    el = np.asarray(el, dtype=np.float32)
-    rxp = np.asarray(rxp, dtype=np.float32)
-    
-    Req = 6378.137
-    f = 1/298.257223563
-    
-    if len(rxp.shape) == 1:
-        lat0 = rxp[0]
-        lon0 = rxp[1]
-    else:
-        lat0 = rxp[:,0]
-        lon0 = rxp[:,1]
-    
-    R = np.sqrt(Req**2 / (1 + (1/(1-f)**2 -1) * np.sin(np.radians(lat0))**2))
-    
-    psi = (np.pi/2 - np.radians(el)) - np.arcsin(R / (R+H) * np.cos(np.radians(el)))
-    
-    lat = np.arcsin(np.sin(np.radians(lat0)) * np.cos(psi) + \
-                    np.cos(np.radians(lat0)) * np.sin(psi) * np.cos(np.radians(az)))
-    
-    lon = np.radians(lon0) + np.arcsin(np.sin(psi) * np.sin(np.radians(az)) / np.cos(lat))
-    
-    return np.degrees(lat), np.degrees(lon)
-
-
-class PointData:
-    """loads observations from file, computes IPPs
-    """
-
-    def __init__(
-        self,
-        file: pathlib.Path,
-        ipp_heights: ArrayLike,
-        latitude_limits: ArrayLike,
-        longitude_limits: ArrayLike,
-        time_limits: ArrayLike,
-    ):
-        self.ipp_heights = ipp_heights
-        self.latitude_limits = latitude_limits
-        self.longitude_limits = longitude_limits
-        self.time_limits = time_limits
-
-        self.az, self.el, self.tid, self.time, self.rx_positions = self.load_data(file)
-    
-    def load_data(self, file):
-        with h5py.File(file) as f:
-            az = f['az'][:]  # time x prn x rx
-            el = f['el'][:]
-            tid = f['res'][:]
-            time = pandas.to_datetime(f['obstimes'][:], unit='s')
-            rx_positions = f['rx_positions'][:]
-        
-        valid_rx = (
-            (rx_positions[:, 0] <= self.latitude_limits[1] + 10) &
-            (rx_positions[:, 0] >= self.latitude_limits[0] - 10) &
-            (rx_positions[:, 1] <= self.longitude_limits[1] + 10) &
-            (rx_positions[:, 1] >= self.longitude_limits[0] - 10)
-        )
-        valid_time = (time >= self.time_limits[0]) & (time <= self.time_limits[1])
-        return (
-            az[valid_time][:, :, valid_rx].astype(float),
-            el[valid_time][:, :, valid_rx].astype(float),
-            tid[valid_time][:, :, valid_rx].astype(float),
-            time[valid_time],
-            rx_positions[valid_rx]
-        )
-    
-    def get_filtered_data(self, h):
-        # aer2ipp requires rx_positions and az/el to have corresponding dimensions
-        ipp_lat, ipp_lon = aer2ipp(self.az, self.el, self.rx_positions, h)
-        # now reshape to (time, rx-prn pair)
-        n_times = ipp_lat.shape[0]
-        ipp_lat = ipp_lat.reshape((n_times, -1))
-        ipp_lon = ipp_lon.reshape((n_times, -1))
-        tid = self.tid.reshape((n_times, -1))
-        # filter all-nan pairs, out-of-bounds pairs
-        mask = (
-            np.isnan(ipp_lat) | 
-            np.isnan(ipp_lon) | 
-            np.isnan(tid) |
-            (ipp_lat > self.latitude_limits[1]) |
-            (ipp_lat < self.latitude_limits[0]) |
-            (ipp_lon > self.longitude_limits[1]) |
-            (ipp_lon < self.longitude_limits[0])
-        )
-        mask = ~np.all(mask, axis=0)
-        ipp_lat = ipp_lat[:, mask]
-        ipp_lon = ipp_lon[:, mask]
-        tid = tid[:, mask]
-        
-        local_coords = Local2D.from_geodetic(
-            np.mean(self.latitude_limits),
-            np.mean(self.longitude_limits),
-            h
-        )
-        x, y = local_coords.convert_from_spherical(ipp_lat, ipp_lon)
-
-        return x, y, tid, ipp_lat, ipp_lon
-    
-    def iter_heights(self, s, e):
-        for h in self.ipp_heights:
-            x, y, tid, ipp_lat, ipp_lon = self.get_filtered_data(h)
-            yield x[s:e], y[s:e], tid[s:e], ipp_lat[s:e], ipp_lon[s:e], self.time[s:e], h
+from pointdata import PointData
 
 
 class FftMethod:
@@ -140,7 +21,7 @@ class FftMethod:
         self.name = name
         self.focus = {}
 
-    def get_image(self, t, x, y, tid):
+    def get_image(self, x, y, tid):
         ...
 
     def get_power(self, img, scale="linear"):
@@ -154,7 +35,7 @@ class FftMethod:
             top = np.argmax(np.sum(dist <= 3.1, axis=1) >= 4)
             pmax = locs[top]
             peak = power[pmax[0], pmax[1]]
-            half_power_level = peak / 2
+            half_power_level = peak / 4
             noise_cutoff = peak / 10
         elif scale == "log":
             power = 10 * np.log10(abs(FFT) ** 2)
@@ -180,8 +61,8 @@ class FftMethod:
         
         self.cutoff_contour = measure.find_contours(convex_hull_image(self.power > noise_cutoff, offset_coordinates=False), .75)[0]
 
-    def run(self, t, x, y, tid):
-        self.X, self.Y, self.img = self.get_image(t, x, y, tid)
+    def run(self, data):
+        self.X, self.Y, self.img = self.get_image(data.x, data.y, data.tid)
         if self.X is None:
             return None
         
@@ -233,7 +114,7 @@ class GriddataMethod(FftMethod):
         self.resolution = resolution
         self.kwargs = kwargs
 
-    def get_image(self, t, x, y, tid):
+    def get_image(self, x, y, tid):
         x = np.nanmedian(x, axis=0)
         y = np.nanmedian(y, axis=0)
         tid = np.nanmedian(tid, axis=0)
@@ -265,7 +146,7 @@ class RbfMethod(FftMethod):
         self.resolution = resolution
         self.kwargs = kwargs
 
-    def get_image(self, t, x, y, tid):
+    def get_image(self, x, y, tid):
         x = np.nanmean(x, axis=0)
         y = np.nanmean(y, axis=0)
         tid = np.nanmean(tid, axis=0)
@@ -293,7 +174,7 @@ class BinnedStatMethod(FftMethod):
         super().__init__(name)
         self.resolution = resolution
 
-    def get_image(self, t, x, y, tid):
+    def get_image(self, x, y, tid):
         x = x.flatten()
         y = y.flatten()
         tid = tid.flatten()
@@ -314,10 +195,10 @@ class MetPyMethod(FftMethod):
     ...
 
 
-def plot_points(ax, x, y, tid, t, h, clim):
-    x = np.nanmean(x, axis=0)
-    y = np.nanmean(y, axis=0)
-    tid = np.nanmean(tid, axis=0)
+def plot_points(ax, data, h, clim):
+    x = np.nanmean(data.x, axis=0)
+    y = np.nanmean(data.y, axis=0)
+    tid = np.nanmean(data.tid, axis=0)
     mask = ~(np.isnan(x) | np.isnan(y) | np.isnan(tid))
     x = x[mask]
     y = y[mask]
@@ -341,24 +222,14 @@ def plot_psd(method, ax):
 
     
 def main():
-    date = '20150325'
-    root = pathlib.Path("C:\\Users\\starrgw1\\Box\\ONR-BAA24-TID\\data")
-    file = root / date / "2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5"
+    file = sys.argv[1]
     tlim = [datetime(2015, 3, 25, 23, 45), datetime(2015, 3, 26, 0, 0)]
-    time_window_width = 4 # x 30s
-    time_window_shift = 4
     latlim = [27, 46]
     lonlim = [-110, -85]
     dalt = 20
     ipp_heights = np.arange(100, 375.1, dalt)
 
-    pointdata = PointData(
-        file,
-        ipp_heights,
-        latlim,
-        lonlim,
-        tlim
-    )
+    points = PointData(file, latlim, lonlim, tlim)
 
     resolution = 10
     methods = [
@@ -373,16 +244,18 @@ def main():
     plots = {}
 
     clim = [-.3, .3]
-    for i, (x, y, tid, lat, lon, t, h) in enumerate(pointdata.iter_heights(4, 8)):
+    for i, h in enumerate(ipp_heights):
+        data = points.get_data_at_height(h)
+        data = data.isel(time=slice(0, 4))
         for method in methods:
-            method.run(t, x, y, tid)
+            method.run(data)
             
             if PLOT_ENABLE:
                 if method.name not in plots:
                     fig, ax = plt.subplots(len(ipp_heights), 3, tight_layout=True, figsize=(9, len(ipp_heights)*2.2), sharex='col', sharey='col')
                     ax[0, 1].set_title(method.__class__.__name__)
                     plots[method.name] = fig, ax
-                plot_points(plots[method.name][1][i, 0], x, y, tid, t, h, clim)
+                plot_points(plots[method.name][1][i, 0], data, h, clim)
                 plot_img(method, plots[method.name][1][i, 1], clim)
                 plot_psd(method, plots[method.name][1][i, 2])
     
@@ -399,14 +272,14 @@ def main():
         ax[i].legend()
 
         if PLOT_ENABLE:
-            plots[method.name][1][0, 0].set_title(f"t=[{t[0]} - {t[-1]}]")
+            plots[method.name][1][0, 0].set_title(f"t=[{data.time.values[0]} - {data.time.values[-1]}]")
             plots[method.name][1][-1, 0].set_xlabel("km")
             plots[method.name][1][-1, 1].set_xlabel("km")
             plots[method.name][1][-1, 2].set_xlabel("wavenumber (1/km)")
-            plots[method.name][0].savefig(f"{method.name}.png")
+            plots[method.name][0].savefig(f"results/{method.name}.png")
             plt.close(plots[method.name][0])
     ax[-1].set_xlabel("height km")
-    fig.savefig("focus.png")
+    fig.savefig("results/focus.png")
     plt.close(fig)
 
 
