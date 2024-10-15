@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 
 from numpy.typing import ArrayLike
 import h5py
@@ -25,6 +26,11 @@ class PointData:
         self.latitude_limits = latitude_limits
         self.longitude_limits = longitude_limits
         self.time_limits = time_limits
+        if isinstance(self.time_limits[0], str):
+            self.time_limits = [
+                datetime.strptime(x, "%Y%m%d_%H%M%S") for x in self.time_limits
+            ]
+
         self.missing_data_threshold = missing_data_threshold
 
         self.az, self.el, self.tid, self.time, self.rx_positions = self.load_file(file)
@@ -60,7 +66,7 @@ class PointData:
         n_times = ipp_lat.shape[0]
         ipp_lat = ipp_lat.reshape((n_times, -1))
         ipp_lon = ipp_lon.reshape((n_times, -1))
-        tid = self.tid.reshape((n_times, -1), copy=True)
+        tid = self.tid.reshape((n_times, -1))
         # filter all-nan pairs, out-of-bounds pairs
         mask = (
             np.isnan(ipp_lat) | 

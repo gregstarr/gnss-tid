@@ -10,3 +10,8 @@ dependencies:
   - xarray
   - metpy
   - scikit-image
+  - pip
+  - pip:
+    - tqdm
+    - tensorflow
+    - hydra-core

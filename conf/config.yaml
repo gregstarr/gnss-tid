@@ -1,0 +1,30 @@
+hydra:
+  job:
+    chdir: True
+
+pointdata:
+  _target_: pointdata.PointData
+  file: /homes/starrgw1/2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5
+  latitude_limits:
+    - 27.0
+    - 46.0
+  longitude_limits:
+    - -110.0
+    - -85.0
+  time_limits:
+    - "20150325_234000"
+    - "20150326_000000"
+  
+run:
+  time_step: 4
+  height_res: 10.0
+
+opt:
+  n_inits: 20
+  max_iter: 1500
+  learning_rate: 8000.0
+  momentum: 0.7
+  end:
+    improvement: 0.00001
+    steps: 100
+  

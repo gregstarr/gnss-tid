@@ -14,8 +14,8 @@ class Local2D:
         """
         self.origin = np.array([x, y, z])
         self.radius = np.linalg.norm(self.origin)
-        self.phi = np.rad2deg(np.atan2(y, x))
-        self.theta = np.rad2deg(np.asin(z / self.radius))
+        self.phi = np.rad2deg(np.arctan2(y, x))
+        self.theta = np.rad2deg(np.arcsin(z / self.radius))
         self.r = Rotation.from_euler(
             "ZX", [self.phi + 90, 90 - self.theta], degrees=True
         )
@@ -73,8 +73,8 @@ class Local2D:
         base_shape = lat.shape
         vec = spherical2ecef(lat.flatten(), lon.flatten(), self.radius)
         vec_geo = self.r.apply(vec, inverse=True)
-        phi = np.atan2(vec_geo[:, 0], vec_geo[:, 1])
-        lengths = np.acos(vec_geo[:, 2] / self.radius) * self.radius
+        phi = np.arctan2(vec_geo[:, 0], vec_geo[:, 1])
+        lengths = np.arccos(vec_geo[:, 2] / self.radius) * self.radius
         x = lengths * np.sin(phi)
         y = lengths * np.cos(phi)
         return x.reshape(base_shape), y.reshape(base_shape)
