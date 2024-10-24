@@ -1,17 +1,19 @@
+channels:
+  - pytorch
 dependencies:
   - python=3.11.*
   - numpy
   - scipy
-  - pymap3d
   - astropy
   - matplotlib
   - h5py
   - cartopy
   - xarray
-  - metpy
   - scikit-image
+  - pytorch==2.5.*
   - pip
   - pip:
     - tqdm
-    - tensorflow
     - hydra-core
+    - pymap3d
+    - metpy

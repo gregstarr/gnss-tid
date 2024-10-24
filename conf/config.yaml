@@ -17,14 +17,17 @@ pointdata:
   
 run:
   time_step: 4
-  height_res: 10.0
+  height_res: 25.0
 
 opt:
-  n_inits: 20
-  max_iter: 1500
-  learning_rate: 8000.0
-  momentum: 0.7
-  end:
-    improvement: 0.00001
-    steps: 100
-  
+  n_inits: 1
+  max_iter: 3000
+  learning_rate: 0.2
+
+stopper:
+  _target_: utils.EarlyStopping
+  improvement: 0.001
+  period: 200
+
+model:
+  _target_: focusing_radial.QuadtraticCorrelationModel
