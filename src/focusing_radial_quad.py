@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -7,108 +8,84 @@ import matplotlib.pyplot as plt
 import pandas
 import tqdm
 import hydra
+from sklearn.preprocessing import StandardScaler
 
 from pointdata import PointData
-from plotting import plot_points, plot_radial, plot_radial2
+from plotting import plot_points, plot_radial2
 
 
-class BasicMseModel(nn.Module):
-    def __init__(self, cbounds, wbounds) -> None:
-        super().__init__()
-        self.history = {
-            "center": [],
-            "wavelength": [],
-            "metric": [],
-            "phase": [],
-            "amplitude": [],
-        }
-        self.center = nn.Parameter(torch.empty(2))
-        self.wavelength = nn.Parameter(torch.empty(1))
-        self.amplitude = nn.Parameter(torch.tensor(0.1), requires_grad=False)
-        with torch.no_grad():
-            nn.init.uniform_(self.center, *cbounds)
-            nn.init.uniform_(self.wavelength, *wbounds)
-    
-    def get_result(self, epoch):
-        wavelength = self.history["wavelength"][epoch]
-        offset = self.history["phase"][epoch] * wavelength / (2 * np.pi)
-        return {
-            "center": self.history["center"][epoch],
-            "amplitude": self.history["amplitude"][epoch],
-            "wavelength": wavelength,
-            "metric": self.history["metric"][epoch],
-            "offset": offset,
-            "history": self.history,
-        }
-
-    def forward(self, xy, tid):
-        dist = torch.linalg.vector_norm(xy - self.center * 100.0, dim=1, keepdim=True)
-        phase = 2.0 * torch.pi * dist / (self.wavelength * 100.0)
-        phase_offset_vals = torch.linspace(0.0, 2.0 * torch.pi, 25)
-        model_out = self.amplitude * torch.cos(phase + phase_offset_vals[None, :])
-        
-        err = model_out - tid[:, None]
-        vals = torch.mean(err ** 2, dim=0)
-        metric = -1.0 * torch.min(vals)
-        phase = phase_offset_vals[torch.argmin(vals)]
-
-        self.history["center"].append(self.center.clone().detach().numpy() * 100)
-        self.history["wavelength"].append(self.wavelength.item() * 100)
-        self.history["metric"].append(metric.item())
-        self.history["phase"].append(phase.item())
-        self.history["amplitude"].append(self.amplitude.item())
-
-        return metric
-
-
-class BasicCorrelationModel(nn.Module):
+class QuadtraticCorrelationModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.history = {
-            "center": [],
-            "wavelength": [],
+            "cx": [],
+            "cy": [],
+            "w0": [],
+            "w2": [],
+            "u": [],
+            "v": [],
             "metric": [],
-            "phase": [],
+            "offset": [],
         }
-        self.center = nn.Parameter(torch.empty(2))
-        self.wavelength = nn.Parameter(torch.empty(1))
-        with torch.no_grad():
-            nn.init.uniform_(self.center, 0.0, 200.0)
-            nn.init.uniform_(self.wavelength, 150.0, 250.0)
+        self.center = nn.Parameter(torch.randn(2) / 2.0)
+        self.u = nn.Parameter(torch.randn(1))
+        self.v = nn.Parameter(torch.randn(1))
+        self.offset_vals = torch.linspace(0.0, 1.0, 20)
     
-    def get_result(self, epoch):
-        wavelength = self.history["wavelength"][epoch]
-        offset = self.history["phase"][epoch] * wavelength / (2 * np.pi)
-        return {
-            "center": self.history["center"][epoch],
-            "wavelength": wavelength,
-            "metric": self.history["metric"][epoch],
-            "offset": offset,
-            "history": self.history,
-        }
-
     def forward(self, xy, tid):
         dist = torch.linalg.vector_norm(xy - self.center, dim=1, keepdim=True)
-        phase = 2.0 * torch.pi * dist / self.wavelength
-        phase_offset_vals = torch.linspace(0.0, 2.0 * torch.pi, 25)
-        model_out = torch.cos(phase + phase_offset_vals[None, :])
+        cycles = self.u * torch.atan(dist * self.v**2)
+        model_out = torch.cos(2.0 * torch.pi * (cycles + self.offset_vals[None, :]))
         
         vals = torch.mean(model_out * tid[:, None], dim=0)
         metric = torch.max(vals)
-        phase = phase_offset_vals[torch.argmax(vals)]
+        offset = self.offset_vals[torch.argmax(vals)]
 
-        self.history["center"].append(self.center.clone().detach().numpy())
-        self.history["wavelength"].append(self.wavelength.item())
-        self.history["metric"].append(metric.item())
-        self.history["phase"].append(phase.item())
+        self.update_history(metric, offset)
 
-        return metric
+        return metric, offset
     
+    def update_history(self, metric, offset):
+        v2 = self.v**2
+        w0 = torch.abs(1 / (self.u * v2))
+        w2 = torch.abs(v2 / self.u)
 
-def optimize(r, tid, cfg, height):
+        self.history["cx"].append(self.center[0].item())
+        self.history["cy"].append(self.center[1].item())
+        self.history["w0"].append(w0.item())
+        self.history["w2"].append(w2.item())
+        self.history["u"].append(self.u.item())
+        self.history["v"].append(v2.item())
+        self.history["metric"].append(metric.item())
+        self.history["offset"].append(offset.item())
+    
+    def get_result(self, epoch):
+        return {
+            "cx": self.history["cx"][epoch],
+            "cy": self.history["cy"][epoch],
+            "w0": self.history["w0"][epoch],
+            "w2": self.history["w2"][epoch],
+            "u": self.history["u"][epoch],
+            "v": self.history["v"][epoch],
+            "metric": self.history["metric"][epoch],
+            "offset": self.history["offset"][epoch],
+            "history": self.history,
+        }
+
+
+def optimize(r: torch.Tensor, tid: torch.Tensor, cfg, height):
+    rmean = torch.mean(r, dim=0, keepdim=True)
+    r.sub_(rmean)
+    rstd = r.std()
+    r.div_(rstd)
+    tidmean = torch.mean(tid)
+    tid.sub_(tidmean)
+    tidstd = tid.std()
+    tid.div_(tidstd)
+
     best_metric = -np.inf
     for start in tqdm.tqdm(range(cfg.opt.n_inits), f"{height=}"):
-        model = hydra.utils.instantiate(cfg.model)
+        model = QuadtraticCorrelationModel()
         stopper = hydra.utils.instantiate(cfg.stopper)
         optimizer = torch.optim.NAdam(
             model.parameters(), cfg.opt.learning_rate, maximize=True
@@ -116,10 +93,9 @@ def optimize(r, tid, cfg, height):
         for epoch in range(cfg.opt.max_iter):
             model.zero_grad()
 
-            metric = model(r, tid)
+            metric, offset = model(r, tid)
             metric.backward()
             optimizer.step()
-
 
             if stopper.should_stop(metric.item(), epoch):
                 break
@@ -128,6 +104,10 @@ def optimize(r, tid, cfg, height):
         if result["metric"] > best_metric:
             best_metric = result["metric"]
             best_result = result
+    best_result["rmean"] = rmean.numpy()
+    best_result["rstd"] = rstd.numpy()
+    best_result["tidmean"] = tidmean.numpy()
+    best_result["tidstd"] = tidstd.numpy()
     return best_result
 
 
@@ -137,6 +117,7 @@ def run_for_height(points, height, time_slice, cfg):
     r = np.column_stack([data.x.values.flatten(), data.y.values.flatten()])
     tid = data.tid.values.flatten()
     mask = np.isnan(r).any(axis=1) | np.isnan(tid)
+    
     r = torch.tensor(r[~mask])
     tid = torch.tensor(tid[~mask])
 
@@ -164,6 +145,8 @@ def run_time_index(points, time_slice, cfg):
 
 
 def plot_results(points: PointData, results: list, time_slice: slice):
+    output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+
     df = pandas.DataFrame(results)
     best = df.iloc[df.metric.argmax()]
     data = points.get_data_at_height(best.height)
@@ -175,12 +158,14 @@ def plot_results(points: PointData, results: list, time_slice: slice):
         ax[i].plot(value)
         ax[i].set_ylabel(key)
         ax[i].grid(True)
-        fig.savefig(f"fit_{time_slice.start:02d}.png")
+        fig.savefig(output_dir / f"fit_{time_slice.start:02d}.png")
         plt.close(fig)
 
+    data["x"] = (data.x - best.rmean[0, 0]) / best.rstd
+    data["y"] = (data.y - best.rmean[0, 1]) / best.rstd
     fig, ax = plt.subplots(1, 3, tight_layout=True, figsize=(12, 5))
     plot_points(ax[0], data)
-    plot_radial2(ax[0], (best.cx, best.cy), best.wavelength, best.wavelength2, best.offset)
+    plot_radial2(ax[0], (best.cx, best.cy), best.w0, best.w2, best.offset)
     ax[0].set_title(f"center=({best.cx}, {best.cy})")
 
     ax[1].axvline(best.height, color="k", linestyle='--', alpha=.5)
@@ -188,7 +173,7 @@ def plot_results(points: PointData, results: list, time_slice: slice):
     ax[1].set_xlabel("height (km)")
     ax[1].set_ylabel("metric")
     ax[1].grid(True)
-    ax[1].set_title(f"wavelength={best.wavelength}")
+    ax[1].set_title(f"wavelength={best.w0:.2f} + {best.w2:.2f}R")
 
     ax[2].plot(metric_history)
     ax[2].set_xlabel("step")
@@ -196,7 +181,7 @@ def plot_results(points: PointData, results: list, time_slice: slice):
     ax[2].grid(True)
     ax[2].set_title(f"time={points.time[time_slice.start]}")
 
-    fig.savefig(f"radial_{time_slice.start:02d}.png")
+    fig.savefig(output_dir / f"radial_{time_slice.start:02d}.png")
     plt.close(fig)
 
 

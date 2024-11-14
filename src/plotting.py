@@ -8,10 +8,12 @@ def plot_radial(ax, center, wavelength, offset):
         ax.add_patch(circle)
 
 
-def plot_radial2(ax, center, wavelength, wavelength2, offset):
-    for i in range(4):
-        radius = np.sqrt(wavelength) * np.tan(i * np.sqrt(wavelength * wavelength2)) / wavelength2
-        circle = plt.Circle(center, radius + offset, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
+def plot_radial2(ax, center, w0, w2, offset):
+    for i in range(5):
+        u = 1/np.sqrt(w0 * w2)
+        v = np.sqrt(w2 / w0)
+        radius = np.tan((i - offset) / u) / v
+        circle = plt.Circle(center, radius, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
         ax.add_patch(circle)
 
 

@@ -1,33 +1,26 @@
-hydra:
-  job:
-    chdir: True
-
 pointdata:
   _target_: pointdata.PointData
-  file: /homes/starrgw1/2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5
+  file: /disk1/tid/data/2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5
   latitude_limits:
-    - 27.0
+    - 26.0
     - 46.0
   longitude_limits:
     - -110.0
     - -85.0
   time_limits:
-    - "20150325_234000"
-    - "20150326_000000"
+    - "20150325_233000"
+    - "20150325_235000"
   
 run:
-  time_step: 4
-  height_res: 25.0
+  time_step: 2
+  height_res: 20.0
 
 opt:
-  n_inits: 1
+  n_inits: 10
   max_iter: 3000
-  learning_rate: 0.2
+  learning_rate: 0.01
 
 stopper:
   _target_: utils.EarlyStopping
   improvement: 0.001
   period: 200
-
-model:
-  _target_: focusing_radial.QuadtraticCorrelationModel
