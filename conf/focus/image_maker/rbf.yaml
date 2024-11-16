@@ -1,0 +1,7 @@
+defaults:
+  - metpy
+  - _self_
+
+interp_type: rbf
+rbf_func: multiquadric
+rbf_smooth: 0.3

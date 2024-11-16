@@ -1,0 +1,7 @@
+defaults:
+  - image_maker: rbf
+
+_target_: spectral.SpectralFocusing
+hmin: 140.0
+hmax: 400.0
+hres: 20.0

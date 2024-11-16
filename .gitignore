@@ -1,5 +1,6 @@
 /scratch/**
-outputs
+/outputs/**
+/multirun/**
 .vscode
 
 # Byte-compiled / optimized / DLL files

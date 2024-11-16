@@ -1,7 +1,7 @@
 from pathlib import Path
 from datetime import datetime
+from typing import Iterable
 
-from numpy.typing import ArrayLike
 import h5py
 import pandas
 import xarray
@@ -17,11 +17,12 @@ class PointData:
 
     def __init__(
         self,
-        file: Path,
-        latitude_limits: ArrayLike,
-        longitude_limits: ArrayLike,
-        time_limits: ArrayLike,
+        files: Path | list[Path],
+        latitude_limits: list,
+        longitude_limits: list,
+        time_limits: list,
         missing_data_threshold: float = .9,
+        flatten_method: str = "mean",
     ):
         self.latitude_limits = latitude_limits
         self.longitude_limits = longitude_limits
@@ -32,78 +33,92 @@ class PointData:
             ]
 
         self.missing_data_threshold = missing_data_threshold
+        self.flatten_method = flatten_method
 
-        self.az, self.el, self.tid, self.time, self.rx_positions = self.load_file(file)
-        self.data = pandas.DataFrame()
-    
+        if not isinstance(files, Iterable):
+            files = [files]
+        
+        data = []
+        for file in files:
+            data.append(self.load_file(file))
+        self._data = xarray.combine_by_coords(
+            data,
+            compat="override",
+            data_vars="minimal",
+            coords="minimal",
+        )
+
+    def get_time_slices(self, window: int, step: int):
+        n_times = self._data.time.shape[0]
+        for i in range(0, n_times - window, step):
+            yield slice(i, i + window)
+
     def load_file(self, file):
         with h5py.File(file) as f:
             az = f['az'][:]  # time x prn x rx
             el = f['el'][:]
-            tid = f['res'][:]
+            tec = f['res'][:]
             time = pandas.to_datetime(f['obstimes'][:], unit='s')
             rx_positions = f['rx_positions'][:]
+            rx_name = f["rx_name"][:]
         
         valid_rx = (
-            (rx_positions[:, 0] <= self.latitude_limits[1] + 10) &
-            (rx_positions[:, 0] >= self.latitude_limits[0] - 10) &
-            (rx_positions[:, 1] <= self.longitude_limits[1] + 10) &
-            (rx_positions[:, 1] >= self.longitude_limits[0] - 10)
+            (rx_positions[:, 0] <= self.latitude_limits[1] + 20) &
+            (rx_positions[:, 0] >= self.latitude_limits[0] - 20) &
+            (rx_positions[:, 1] <= self.longitude_limits[1] + 20) &
+            (rx_positions[:, 1] >= self.longitude_limits[0] - 20)
         )
         valid_time = (time >= self.time_limits[0]) & (time <= self.time_limits[1])
-        return (
-            az[valid_time][:, :, valid_rx].astype(float),
-            el[valid_time][:, :, valid_rx].astype(float),
-            tid[valid_time][:, :, valid_rx].astype(float),
-            time[valid_time],
-            rx_positions[valid_rx]
-        )
+
+        data = xarray.Dataset(
+            data_vars={
+                "az": (["time", "prn", "rx"], az[valid_time][:, :, valid_rx].astype(float)),
+                "el": (["time", "prn", "rx"], el[valid_time][:, :, valid_rx].astype(float)),
+                "tec": (["time", "prn", "rx"], tec[valid_time][:, :, valid_rx].astype(float)),
+                "rx_position": (["rx", "geo"], rx_positions[valid_rx].astype(float)),
+            },
+            coords={
+                "time": time[valid_time],
+                "prn": np.arange(32),
+                "rx": rx_name[valid_rx, 0].astype(str),
+                "geo": ["lat", "lon", "alt"],
+            },
+        ).dropna("prn", how="all", subset=["tec"]).dropna("rx", how="all", subset=["tec"])
+        return data
     
-    def get_data_at_height(self, h) -> xarray.Dataset:
-        # aer2ipp requires rx_positions and az/el to have corresponding dimensions
-        ipp_lat, ipp_lon = aer2ipp(self.az, self.el, self.rx_positions, h)
-        # now reshape to (time, rx-prn pair)
-        n_times = ipp_lat.shape[0]
-        ipp_lat = ipp_lat.reshape((n_times, -1))
-        ipp_lon = ipp_lon.reshape((n_times, -1))
-        tid = self.tid.reshape((n_times, -1))
-        # filter all-nan pairs, out-of-bounds pairs
-        mask = (
-            np.isnan(ipp_lat) | 
-            np.isnan(ipp_lon) | 
-            np.isnan(tid) |
-            (ipp_lat > self.latitude_limits[1]) |
-            (ipp_lat < self.latitude_limits[0]) |
-            (ipp_lon > self.longitude_limits[1]) |
-            (ipp_lon < self.longitude_limits[0])
+    def get_data(self, time_slice: slice, h: float) -> xarray.Dataset:
+        data = (
+            self._data.isel(time=time_slice)
+            .dropna("prn", how="all", subset=["tec"])
+            .dropna("rx", how="all", subset=["tec"])
+            .dropna("prn", how="all", subset=["az"])
+            .dropna("rx", how="all", subset=["az"])
+            .mean(dim="time")
+            .assign_attrs(time=self._data.time.values[0], height=h)
         )
-        mask = ~np.all(mask, axis=0)
-        ipp_lat = ipp_lat[:, mask]
-        ipp_lon = ipp_lon[:, mask]
-        tid = tid[:, mask]
-        # filter mostly-nan times
-        mask = np.isnan(ipp_lat) | np.isnan(ipp_lon) | np.isnan(tid)
-        time_mask = np.mean(mask, axis=1) < self.missing_data_threshold
-        ipp_lat = ipp_lat[time_mask]
-        ipp_lon = ipp_lon[time_mask]
-        tid = tid[time_mask]
+        # aer2ipp requires rx_positions and az/el to have corresponding dimensions
+        ipp_lat, ipp_lon = aer2ipp(data.az, data.el, data.rx_position, h)
+        data["lat"] = (data.az.dims, ipp_lat)
+        data["lon"] = (data.az.dims, ipp_lon)
         
+        # now reshape to (time, rx-prn pair)
+        data = (
+            data.drop_dims(["geo"])
+            .stack(los=("rx", "prn"))
+            .dropna("los")
+            .reset_index("los")
+            .query(los=f"lat > {self.latitude_limits[0]}")
+            .query(los=f"lat < {self.latitude_limits[1]}")
+            .query(los=f"lon > {self.longitude_limits[0]}")
+            .query(los=f"lon < {self.longitude_limits[1]}")
+        )
         local_coords = Local2D.from_geodetic(
             np.mean(self.latitude_limits),
             np.mean(self.longitude_limits),
             h
         )
-        x, y = local_coords.convert_from_spherical(ipp_lat, ipp_lon)
-
-        data = xarray.Dataset(
-            {
-                "x": (["time", "los"], x),
-                "y": (["time", "los"], y),
-                "lat": (["time", "los"], ipp_lat),
-                "lon": (["time", "los"], ipp_lon),
-                "tid": (["time", "los"], tid),
-            },
-            coords={"time": self.time[time_mask]},
-        )
+        x, y = local_coords.convert_from_spherical(data.lat.values, data.lon.values)
+        data["x"] = (data.az.dims, x)
+        data["y"] = (data.az.dims, y)
 
         return data

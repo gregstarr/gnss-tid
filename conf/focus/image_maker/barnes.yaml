@@ -1,0 +1,8 @@
+defaults:
+  - metpy
+  - _self_
+
+interp_type: barnes
+gamma: 1.0
+search_radius: 150.0
+kappa_star: 15

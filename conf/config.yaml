@@ -1,26 +1,13 @@
-pointdata:
-  _target_: pointdata.PointData
-  file: /disk1/tid/data/2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5
-  latitude_limits:
-    - 26.0
-    - 46.0
-  longitude_limits:
-    - -110.0
-    - -85.0
-  time_limits:
-    - "20150325_233000"
-    - "20150325_235000"
-  
-run:
-  time_step: 2
-  height_res: 20.0
+defaults:
+  - _self_
+  - focus: spectral
+  - event: "20150325"
+  - debug
 
-opt:
-  n_inits: 10
-  max_iter: 3000
-  learning_rate: 0.01
+sample:
+  window: 4
+  step: 2
 
-stopper:
-  _target_: utils.EarlyStopping
-  improvement: 0.001
-  period: 200
+hydra:
+  job:
+    chdir: True
