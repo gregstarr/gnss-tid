@@ -1,6 +1,3 @@
-defaults:
-  - override focus: image_test
-
 event:
   pointdata:
     files:

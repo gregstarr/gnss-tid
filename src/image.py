@@ -1,54 +1,43 @@
 from typing import Protocol
+import logging
 
-from matplotlib import pyplot as plt
 import numpy as np
-from metpy.interpolate import interpolate_to_grid
+from metpy import interpolate as mtpi
 from skimage import filters
+
+logger = logging.getLogger(__name__)
 
 
 class ImageMaker(Protocol):
-    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> np.ndarray: ...
+    def initialize(self, x: np.ndarray, y: np.ndarray): ...
 
 
 class MetpyImageMaker:
-    def __init__(self, hp_freq=.05, **kwargs):
+    def __init__(self, hres, hp_freq=.05, **kwargs):
         self.kwargs = kwargs
         self.hp_freq = hp_freq
+        self.hres = hres
+        self.points = None
+        self.shape = None
+        self.xp = None
+        self.yp = None
+
+    def initialize(self, x: np.ndarray, y: np.ndarray):
+        boundary_coords = mtpi.grid.get_boundary_coords(x, y)
+        for k, v in boundary_coords.items():
+            logger.info("image boundary %s: %.2f", k, v)
+        x_grid, y_grid = mtpi.grid.generate_grid(self.hres, boundary_coords)
+        self.points = mtpi.grid.generate_grid_coords(x_grid, y_grid)
+        self.shape = x_grid.shape
+        self.xp = x_grid[0]
+        self.yp = y_grid[:, 0]
     
-    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        x_grid, y_grid, img = interpolate_to_grid(x, y, tec, **self.kwargs)
+    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> np.ndarray:
+        pts = np.column_stack((x, y))
+        img = mtpi.interpolate_to_points(pts, tec, self.points, **self.kwargs)
+        img = img.reshape(self.shape)
+
         img[np.isnan(img)] = 0
         img = filters.butterworth(img, self.hp_freq, high_pass=True)
-        return x_grid, y_grid, img
-
-
-class ImageTestProcess:
-
-    def __init__(self, image_maker: ImageMaker, height):
-        self.image_maker = image_maker
-        self.height = height
-        self.title = "|".join([f"{k}={v}" for k, v in self.image_maker.kwargs.items()])
-
-    def run(self, points, window: int, step: int):
-        for t in points.get_time_slices(window, step):
-            data = points.get_data(t, self.height)
-            x_grid, y_grid, img = self.image_maker(data.x.values, data.y.values, data.tec.values)
-            FFT = np.fft.fftshift(np.fft.fft2(img))
-            power = abs(FFT) ** 2
-            edges = filters.scharr(img)
-            efft = np.fft.fftshift(np.fft.fft2(edges))
-            epower = 10*np.log(abs(efft) ** 2)
-            g = filters.gabor(img, .1, np.pi/4)
-            g = np.hypot(*g)
-            
-            fig, ax = plt.subplots(3, 2, figsize=(18, 10), tight_layout=True)
-            fig.suptitle(self.title)
-            ax[0, 0].scatter(data.x.values, data.y.values, c=data.tec.values, s=6, vmin=-.3, vmax=.3, cmap='bwr')
-            extent = [x_grid.min(), x_grid.max(), y_grid.min(), y_grid.max()]
-            ax[0, 1].imshow(img, vmin=-.3, vmax=.3, cmap="bwr", origin="lower", extent=extent)
-            ax[1, 0].imshow(power, origin="lower")
-            ax[1, 1].imshow(edges, origin="lower", extent=extent)
-            ax[2, 0].imshow(epower, origin="lower")
-            ax[2, 1].imshow(g, origin="lower", extent=extent)
-            fig.savefig("TEST.png")
-            return
+        return img

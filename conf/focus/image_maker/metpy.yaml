@@ -1,4 +1,4 @@
 _target_: image.MetpyImageMaker
 interp_type: ???
-hres: 10
+hres: 20
 hp_freq: .02

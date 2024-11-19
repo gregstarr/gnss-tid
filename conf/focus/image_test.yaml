@@ -1,5 +1,0 @@
-defaults:
-  - image_maker: metpy
-
-_target_: image.ImageTestProcess
-height: 200.0

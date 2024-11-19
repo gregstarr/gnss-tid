@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import datetime
 from typing import Iterable
+import logging
 
 import h5py
 import pandas
@@ -9,6 +10,7 @@ import numpy as np
 
 from coords import Local2D, aer2ipp
 
+logger = logging.getLogger(__name__)
 
 
 class PointData:
@@ -50,8 +52,9 @@ class PointData:
 
     def get_time_slices(self, window: int, step: int):
         n_times = self._data.time.shape[0]
-        for i in range(0, n_times - window, step):
-            yield slice(i, i + window)
+        slices = [slice(i, i + window) for i in range(0, n_times - window, step)]
+        times = [self._data.time.values[i] for i in range(0, n_times - window, step)]
+        return slices, times
 
     def load_file(self, file):
         with h5py.File(file) as f:
@@ -86,7 +89,10 @@ class PointData:
         ).dropna("prn", how="all", subset=["tec"]).dropna("rx", how="all", subset=["tec"])
         return data
     
-    def get_data(self, time_slice: slice, h: float) -> xarray.Dataset:
+    def get_coord_center(self):
+        return np.mean(self.latitude_limits), np.mean(self.longitude_limits)
+    
+    def get_data(self, time_slice: slice, h: float) -> xarray.Dataset | None:
         data = (
             self._data.isel(time=time_slice)
             .dropna("prn", how="all", subset=["tec"])
@@ -96,6 +102,9 @@ class PointData:
             .mean(dim="time")
             .assign_attrs(time=self._data.time.values[0], height=h)
         )
+        if data.az.size == 0:
+            logger.warning("empty az data: %s", time_slice)
+            return None
         # aer2ipp requires rx_positions and az/el to have corresponding dimensions
         ipp_lat, ipp_lon = aer2ipp(data.az, data.el, data.rx_position, h)
         data["lat"] = (data.az.dims, ipp_lat)
@@ -112,11 +121,10 @@ class PointData:
             .query(los=f"lon > {self.longitude_limits[0]}")
             .query(los=f"lon < {self.longitude_limits[1]}")
         )
-        local_coords = Local2D.from_geodetic(
-            np.mean(self.latitude_limits),
-            np.mean(self.longitude_limits),
-            h
-        )
+        if data.lat.size == 0:
+            logger.warning("empty lat data: %s", time_slice)
+            return None
+        local_coords = Local2D.from_geodetic(*self.get_coord_center(), h)
         x, y = local_coords.convert_from_spherical(data.lat.values, data.lon.values)
         data["x"] = (data.az.dims, x)
         data["y"] = (data.az.dims, y)

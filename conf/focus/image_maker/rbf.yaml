@@ -4,4 +4,4 @@ defaults:
 
 interp_type: rbf
 rbf_func: multiquadric
-rbf_smooth: 0.3
+rbf_smooth: 0.2

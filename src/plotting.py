@@ -1,5 +1,7 @@
 import numpy as np
 from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 
 
 def plot_radial(ax, center, wavelength, offset):
@@ -29,3 +31,20 @@ def plot_points(ax, data, clim=(-.3, .3)):
     ax.grid(True)
     ax.set_xlim(np.nanmin(data.x), np.nanmax(data.x))
     ax.set_ylim(np.nanmin(data.y), np.nanmax(data.y))
+
+
+def plot_objective_vs_height(heights, objective, title, save_fn):
+    fig, ax = plt.subplots()
+    ax.plot(heights, objective / objective.max())
+    ax.grid(True)
+    ax.set_ylim(.5, 1)
+    ax.set_title(title)
+    fig.savefig(save_fn)
+
+
+def plot_focusheight_vs_time(time, focus_height, save_fn, title=None):
+    fig, ax = plt.subplots()
+    ax.plot(time, focus_height)
+    ax.grid(True)
+    ax.set_title(title)
+    fig.savefig(save_fn)
