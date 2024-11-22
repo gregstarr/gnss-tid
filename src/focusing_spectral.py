@@ -88,6 +88,9 @@ def main(cfg):
     mask = space_max_height_maxi_freq > np.quantile(space_max_height_maxi_freq, .75)
     height_sum_topq_space_maxi_freq = heightspace_maxi_freq[:, mask].sum(axis=1)
 
+    patch_max = B.max(axis=(-2, -1), keepdims=True)
+    
+
     ax.grid(True)
     ax.plot(focuser.heights, height_max_all / height_max_all.max(), label="max all")
     ax.plot(focuser.heights, baseline / baseline.max(), label="single fft max")

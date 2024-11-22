@@ -2,6 +2,7 @@ from typing import Protocol
 import logging
 
 import numpy as np
+import xarray
 from metpy import interpolate as mtpi
 from skimage import filters
 
@@ -33,11 +34,15 @@ class MetpyImageMaker:
         self.xp = x_grid[0]
         self.yp = y_grid[:, 0]
     
-    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray:
+        if self.points is None:
+            logger.warning("ImageMaker not initialized. Initializing from first inputs.")
+            self.initialize(x, y)
+        
         pts = np.column_stack((x, y))
         img = mtpi.interpolate_to_points(pts, tec, self.points, **self.kwargs)
         img = img.reshape(self.shape)
 
         img[np.isnan(img)] = 0
         img = filters.butterworth(img, self.hp_freq, high_pass=True)
-        return img
+        return xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])

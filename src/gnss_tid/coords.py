@@ -1,5 +1,4 @@
 import numpy as np
-from numpy.typing import ArrayLike
 from scipy.spatial.transform import Rotation
 import pymap3d
 
@@ -59,7 +58,7 @@ class Local2D:
         vec = spherical2ecef(lat, lon, radius)
         return cls(vec[0], vec[1], vec[2])
 
-    def convert_from_spherical(self, lat: ArrayLike, lon: ArrayLike):
+    def convert_from_spherical(self, lat: np.ndarray, lon: np.ndarray):
         """convert spherical coordinates to local cartesian
 
         Parameters
@@ -79,7 +78,7 @@ class Local2D:
         y = lengths * np.cos(phi)
         return x.reshape(base_shape), y.reshape(base_shape)
 
-    def convert_to_spherical(self, xi: ArrayLike, yi: ArrayLike):
+    def convert_to_spherical(self, xi: np.ndarray, yi: np.ndarray):
         """convert spherical coordinates to local cartesian
 
         Parameters
@@ -104,7 +103,7 @@ class Local2D:
         return lat.reshape(base_shape), lon.reshape(base_shape)
 
 
-def spherical2ecef(lat: ArrayLike, lon: ArrayLike, radius: ArrayLike):
+def spherical2ecef(lat: np.ndarray, lon: np.ndarray, radius: np.ndarray):
     """convert spherical coordinates to ECEF
 
     Parameters
@@ -124,7 +123,7 @@ def spherical2ecef(lat: ArrayLike, lon: ArrayLike, radius: ArrayLike):
     return Rotation.from_euler("ZY", rotations, degrees=True).apply(base)
 
 
-def ecef2spherical(x: ArrayLike, y: ArrayLike, z: ArrayLike):
+def ecef2spherical(x: np.ndarray, y: np.ndarray, z: np.ndarray):
     """convert ECEF coordinates to spherical
 
     Parameters

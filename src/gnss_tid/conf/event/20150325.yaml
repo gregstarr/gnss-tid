@@ -1,5 +1,5 @@
 pointdata:
-  _target_: pointdata.PointData
+  _target_: gnss_tid.pointdata.PointData
   files:
     - /disk1/tid/data/2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5
     - /disk1/tid/data/2015_0326T0000-0327T0000_all0326.yaml_30el_30s_ra.h5

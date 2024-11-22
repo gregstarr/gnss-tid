@@ -8,7 +8,7 @@ import pandas
 import xarray
 import numpy as np
 
-from coords import Local2D, aer2ipp
+from .coords import Local2D, aer2ipp
 
 logger = logging.getLogger(__name__)
 

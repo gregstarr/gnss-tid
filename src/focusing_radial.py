@@ -9,7 +9,7 @@ import tqdm
 import hydra
 
 from pointdata import PointData
-from plotting import plot_points, plot_radial, plot_radial2
+from gnss_tid.plotting import plot_points, plot_radial, plot_radial2
 
 
 class BasicMseModel(nn.Module):

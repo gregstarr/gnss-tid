@@ -1,0 +1,4 @@
+_target_: gnss_tid.image.MetpyImageMaker
+interp_type: ???
+hres: 20
+hp_freq: .02
