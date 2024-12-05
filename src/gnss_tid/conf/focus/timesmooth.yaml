@@ -1,0 +1,13 @@
+defaults:
+  - image_maker: rbf
+  - center_finder: radial
+
+_target_: gnss_tid.spectral.SmoothedPatchSpectral
+height_min: 160
+height_max: 400
+height_step: 10
+block_size: 32
+block_step: 16
+kaiser_beta: 1
+quantile_thresh: 0
+n_jobs: 10

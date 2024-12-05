@@ -87,7 +87,7 @@ class BlockSpectralFocusing:
     def run(self, points: PointData, window: int, step: int):
         self.initialize_image_maker(points, window, step)
 
-        logger.info("running BlockSpectralProcessing")
+        logger.info("running %s", self.__class__.__name__)
         Path("plots").mkdir(exist_ok=True)
         slices, times = points.get_time_slices(window, step)
         if self.n_jobs > 1:
@@ -129,7 +129,7 @@ class BlockSpectralFocusing:
         if data is None:
             return
         wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
-        data = self.process_patches(data)
+        data = data.merge(self.process_patches(data))
         output = (
             data
             .isel(height=data.objective.argmax())
@@ -212,4 +212,76 @@ class BlockSpectralFocusing:
             .rename_vars({"kx": "Fx", "ky": "Fy"})
             .assign(objective=lambda x: x.F.sum(dim=["px", "py"]))
         )
-        return data.merge(result)
+        return result
+
+
+class SmoothedPatchSpectral(BlockSpectralFocusing):
+    def __init__(self, *args, time_window=15, dist_thresh=100, density_thresh=20, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.time_window = time_window
+        self.dist_thresh = dist_thresh
+        self.density_thresh = density_thresh
+
+    def run_time(self, points, ts: slice, time, log_queue=None):
+        wlog = configure_worker_logger(log_queue)
+        wlog.info("[%03d-%03d]: processing heights", ts.start, ts.stop)
+        data = self.process_heights(points, ts, wlog)
+        if data is None:
+            return
+        wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
+        data = self.process_patches(data).objective
+        return data.expand_dims(time=[time])
+    
+    def run_center_finder(self, data):
+        result = self.center_finder(c0, w0, data.x.values, data.y.values, data.tec.values)
+        return result
+    
+    def run(self, points: PointData, window: int, step: int):
+        data = super().run(points, window, step)
+    
+        smoothed = np.exp(
+            np.log(data)
+            .rolling(time=self.time_window, center=True, min_periods=1)
+            .mean()
+        )
+        focus_height = smoothed.isel(height=smoothed.argmax(dim="height"))
+        slices, times = points.get_time_slices(window, step)
+        images = []
+        patches = []
+        density = []
+        for ii, ts in enumerate(slices):
+            height = focus_height.isel(time=ii).height.item()
+            data = points.get_data(ts, height)
+            img = self.image_maker(data.x.values, data.y.values, data.tec.values)
+            dd = self.image_maker.get_data_density(
+                data.x.values,
+                data.y.values,
+                self.dist_thresh,
+            )
+            p = self.get_fft_patches(img)
+            images.append(img)
+            density.append(dd)
+            patches.append(p)
+        data = (
+            xarray.concat(images, "time")
+            .to_dataset(name="image")
+            .assign(
+                patch=xarray.concat(patches, "time"),
+                objective=focus_height,
+                density=xarray.concat(density, "time"),
+            )
+            .reset_coords()
+        )
+        data = data.merge(self.process_patches(data), compat="override")
+
+        sparse_img = (
+            data.image
+            .where(data.density > self.density_thresh)
+            .stack(row=("x", "y"))
+            .reset_index("row")
+            .dropna(dim="row")
+            .reset_coords()
+            .assign(time=lambda D: (D.time - D.time.min()).dt.total_seconds() / 60)
+        )
+
+        return data

@@ -1,8 +1,8 @@
 defaults:
   - _self_
-  - focus: spectral
-  - event: "20150325"
-  # - debug
+  - focus: timesmooth
+  - event: "20150325_half"
+  - debug
 
 output_fn: "autofocus.h5"
 

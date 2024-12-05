@@ -13,19 +13,19 @@ def plot_circles(center, wavelength, offset, ax=None, data=None):
     else:
         maxr = 1200
     ax.plot(center[0], center[1], 'k+')
-    for radius in np.arange(1, maxr, wavelength):
-        circle = plt.Circle(center, radius + offset, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
+    for radius in np.arange((-1 * offset) % wavelength, maxr, wavelength):
+        circle = plt.Circle(center, radius, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
         ax.add_patch(circle)
 
 
-def plot_patches(data, img=True, ax=None, scale_base=.035, width=.006):
+def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
     if ax is None:
         ax = plt.gca()
     kmag = np.hypot(data.Fx, data.Fy)
-    kscale = np.log(data.F) / kmag.where(lambda x: x > 0, 1)
+    kscale = data.F / kmag.where(lambda x: x > 0, 1)
     data = data.assign(K=kmag, vx=data.Fx*kscale, vy=data.Fy*kscale)
     if img:
-        data.image.plot(ax=ax, vmax=.3, add_colorbar=False, aspect=1)
+        data.image.plot(ax=ax, vmax=.3)
     # directions
     scale = scale_base * data.kx.shape[0] / 32
     data.plot.quiver(

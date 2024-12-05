@@ -5,13 +5,15 @@ import numpy as np
 import xarray
 from metpy import interpolate as mtpi
 from skimage import filters
+from sklearn.metrics import pairwise_distances
 
 logger = logging.getLogger(__name__)
 
 
 class ImageMaker(Protocol):
-    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> np.ndarray: ...
+    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray: ...
     def initialize(self, x: np.ndarray, y: np.ndarray): ...
+    def get_data_density(self, x, y, threshold) -> xarray.DataArray: ...
 
 
 class MetpyImageMaker:
@@ -46,3 +48,9 @@ class MetpyImageMaker:
         img[np.isnan(img)] = 0
         img = filters.butterworth(img, self.hp_freq, high_pass=True)
         return xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
+    
+    def get_data_density(self, x, y, threshold):
+        pd = pairwise_distances(self.points, np.column_stack((x, y)))
+        n = np.sum(pd < threshold, axis=1)
+        w = n.reshape(self.shape)
+        return xarray.DataArray(w, coords=[self.yp, self.xp], dims=["y", "x"])
