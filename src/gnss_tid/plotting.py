@@ -1,6 +1,8 @@
 import numpy as np
 from matplotlib import pyplot as plt
+import matplotlib.animation as animation
 from scipy.ndimage import maximum_filter1d
+from tqdm import autonotebook
 
 from .spectral import find_center
 
@@ -8,15 +10,19 @@ from .spectral import find_center
 def plot_circles(center, wavelength, offset, ax=None, data=None):
     if ax is None:
         ax = plt.gca()
+    artists = []
     if data is not None:
-        data.plot.scatter(ax=ax, x="x", y="y", hue="tec", vmax=.3, add_colorbar=False)
+        artists.append(
+            data.plot.scatter(ax=ax, x="x", y="y", hue="tec", vmax=.3, add_colorbar=False)
+        )
         maxr = min(np.max(data.x.values - center[0]), np.max(data.y.values - center[1])) * .9
     else:
         maxr = 1200
-    ax.plot(center[0], center[1], 'k+')
+    artists += ax.plot(center[0], center[1], 'k+')
     for radius in np.arange((-1 * offset) % wavelength, maxr, wavelength):
         circle = plt.Circle(center, radius, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
-        ax.add_patch(circle)
+        artists.append(ax.add_patch(circle))
+    return artists
 
 
 def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
@@ -111,3 +117,47 @@ def plot_center_finder_fit(result_list, s=4):
     ax[1, 3].set_xlabel("time")
 
     return fig, ax
+
+
+def make_animation(data, save_fn, limit=-1, writer="pillow"):
+    with plt.style.context("bmh"):
+        layout = [
+            ["A", "B"],
+            ["C", "D"],
+            ["E", "E"],
+        ]
+        fig, ax = plt.subplot_mosaic(
+            layout,
+            figsize=(10, 10),
+            height_ratios=[10, 10, 22],
+            tight_layout=True,
+        )
+
+        animation_artists = []
+        if limit <= 0:
+            limit = data.time.shape[0]
+        for ii in autonotebook.tqdm(range(limit), "creating frames"):
+            frame_artists = []
+            frame_artists += data.height.plot(ax=ax["A"], c="blue")
+            frame_artists += data.wavelength.plot(ax=ax["B"], c="blue")
+            frame_artists += data.objective.plot(ax=ax["C"], yscale="log", c="blue")
+            frame_artists += data.offset.plot(ax=ax["D"], c="blue")
+            frame_artists += [
+                ax["A"].axvline(data.time.values[ii], color="k", linestyle='--'),
+                ax["B"].axvline(data.time.values[ii], color="k", linestyle='--'),
+                ax["C"].axvline(data.time.values[ii], color="k", linestyle='--'),
+                ax["D"].axvline(data.time.values[ii], color="k", linestyle='--'),
+                data.isel(time=ii).image.drop_vars("time").plot(ax=ax["E"], vmax=.3, add_colorbar=False)
+            ]
+
+            frame_artists += plot_circles(data.center, data.wavelength.isel(time=ii), data.offset.isel(time=ii), ax=ax["E"])
+
+            animation_artists.append(frame_artists)
+
+        ani = animation.ArtistAnimation(fig=fig, artists=animation_artists, interval=200)
+        with autonotebook.tqdm(total=len(animation_artists), desc='Saving video') as progress_bar:
+            ani.save(
+                filename=save_fn, 
+                writer=writer,
+                progress_callback=lambda _i, _n: progress_bar.update()
+            )
