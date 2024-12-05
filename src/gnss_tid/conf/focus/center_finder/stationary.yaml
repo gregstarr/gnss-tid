@@ -1,0 +1,5 @@
+_target_: gnss_tid.radial.StationaryCenterFinder
+max_iter: 500
+learning_rate: 1.0
+num_starts: 5
+reg_strength: .001

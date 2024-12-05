@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 import pymap3d
+import xarray
 
 
 class Local2D:
@@ -152,19 +153,22 @@ def aer2ipp(az, el, rxp, H=350):
     Doi:10.1590/s1982-21702017000400044
     Web: http://www.scielo.br/scielo.php?script=sci_arttext&pid=S1982-21702017000400669&lng=en&tlng=en
     """
-    az = np.asarray(az, dtype=np.float32)
-    el = np.asarray(el, dtype=np.float32)
-    rxp = np.asarray(rxp, dtype=np.float32)
+    if isinstance(az, xarray.DataArray):
+        lat0 = rxp.sel(geo="lat")
+        lon0 = rxp.sel(geo="lon")
+    else:
+        az = np.asarray(az, dtype=np.float32)
+        el = np.asarray(el, dtype=np.float32)
+        rxp = np.asarray(rxp, dtype=np.float32)
+        if len(rxp.shape) == 1:
+            lat0 = rxp[0]
+            lon0 = rxp[1]
+        else:
+            lat0 = rxp[:,0]
+            lon0 = rxp[:,1]
     
     Req = 6378.137
     f = 1/298.257223563
-    
-    if len(rxp.shape) == 1:
-        lat0 = rxp[0]
-        lon0 = rxp[1]
-    else:
-        lat0 = rxp[:,0]
-        lon0 = rxp[:,1]
     
     R = np.sqrt(Req**2 / (1 + (1/(1-f)**2 -1) * np.sin(np.radians(lat0))**2))
     

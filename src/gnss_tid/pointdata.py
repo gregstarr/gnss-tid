@@ -100,33 +100,30 @@ class PointData:
             .dropna("prn", how="all", subset=["az"])
             .dropna("rx", how="all", subset=["az"])
             .mean(dim="time")
-            .assign_attrs(time=self._data.time.values[0], height=h)
+            .assign_attrs(time=self._data.time.values[time_slice.start], height=h)
         )
         if data.az.size == 0:
             logger.warning("empty az data: %s", time_slice)
             return None
         # aer2ipp requires rx_positions and az/el to have corresponding dimensions
         ipp_lat, ipp_lon = aer2ipp(data.az, data.el, data.rx_position, h)
-        data["lat"] = (data.az.dims, ipp_lat)
-        data["lon"] = (data.az.dims, ipp_lon)
         
         # now reshape to (time, rx-prn pair)
         data = (
-            data.drop_dims(["geo"])
+            data.assign(lat=ipp_lat.drop_vars("geo"), lon=ipp_lon)
+            .drop_vars(["rx_position", "az", "el"])
+            .drop_dims("geo")
             .stack(los=("rx", "prn"))
             .dropna("los")
             .reset_index("los")
-            .query(los=f"lat > {self.latitude_limits[0]}")
-            .query(los=f"lat < {self.latitude_limits[1]}")
-            .query(los=f"lon > {self.longitude_limits[0]}")
-            .query(los=f"lon < {self.longitude_limits[1]}")
+            .query(los=f"lat > {self.latitude_limits[0]} & lat < {self.latitude_limits[1]}")
+            .query(los=f"lon > {self.longitude_limits[0]} & lon < {self.longitude_limits[1]}")
         )
         if data.lat.size == 0:
             logger.warning("empty lat data: %s", time_slice)
             return None
         local_coords = Local2D.from_geodetic(*self.get_coord_center(), h)
         x, y = local_coords.convert_from_spherical(data.lat.values, data.lon.values)
-        data["x"] = (data.az.dims, x)
-        data["y"] = (data.az.dims, y)
+        data = data.assign(x=(data.tec.dims, x), y=(data.tec.dims, y))
 
         return data

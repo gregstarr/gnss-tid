@@ -8,6 +8,7 @@ import xarray
 from scipy.fft import fft2, fftfreq
 from scipy.signal.windows import kaiser
 from joblib import Parallel, delayed
+from matplotlib import pyplot as plt
 
 from .pointdata import PointData
 from .image import ImageMaker
@@ -232,10 +233,6 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
         data = self.process_patches(data).objective
         return data.expand_dims(time=[time])
     
-    def run_center_finder(self, data):
-        result = self.center_finder(c0, w0, data.x.values, data.y.values, data.tec.values)
-        return result
-    
     def run(self, points: PointData, window: int, step: int):
         data = super().run(points, window, step)
     
@@ -245,11 +242,19 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
             .mean()
         )
         focus_height = smoothed.isel(height=smoothed.argmax(dim="height"))
+
+        fig, ax = plt.subplots(figsize=(5, 6), tight_layout=True)
+        smoothed.plot(ax=ax)
+        ax.plot(focus_height.height, focus_height.time, 'r.-')
+        fig.savefig("plots/objective.png")
+        plt.close(fig)
+
         slices, times = points.get_time_slices(window, step)
         images = []
         patches = []
         density = []
         for ii, ts in enumerate(slices):
+            logger.info("collecting focused data %d / %d", ii, len(slices))
             height = focus_height.isel(time=ii).height.item()
             data = points.get_data(ts, height)
             img = self.image_maker(data.x.values, data.y.values, data.tec.values)
@@ -281,7 +286,29 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
             .reset_index("row")
             .dropna(dim="row")
             .reset_coords()
-            .assign(time=lambda D: (D.time - D.time.min()).dt.total_seconds() / 60)
+        )
+
+        params = self.run_center_finder(data, sparse_img)
+        logger.info("params fit in %d iterations", len(params["history"]["metric"]))
+        data = data.assign(
+            center=("ci", params["center"]),
+            wavelength=("time", params["wavelength"]),
+            offset=("time", params["offset"]),
+            phase=("time", params["phase"]),
         )
 
         return data
+
+    def run_center_finder(self, data, sparse_img):
+        logger.info("finding center")
+        d = data.isel(time=data.objective.argmax())
+        X, Y = np.meshgrid(d.px.values, d.py.values)
+        pts = np.column_stack([X.ravel(), Y.ravel()])
+        weights = d.F.values.ravel()
+        vectors = np.column_stack((d.Fx.values.ravel(), d.Fy.values.ravel()))
+        k = np.hypot(vectors[:, 0], vectors[:, 1])
+        c0 = find_center(pts, vectors, weights)
+        w0 = 1 / k.max()
+        
+        result = self.center_finder(c0, w0, sparse_img.x.values, sparse_img.y.values, sparse_img.image.values.T)
+        return result

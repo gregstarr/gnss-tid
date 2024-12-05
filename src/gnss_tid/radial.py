@@ -3,6 +3,12 @@ import logging
 import numpy as np
 import torch
 from torch import nn
+from matplotlib import pyplot as plt
+
+from .plotting import plot_center_finder_fit
+
+
+logger = logging.getLogger(__name__)
 
 
 class CorrelationModel(nn.Module):
@@ -139,48 +145,40 @@ class CenterModel(nn.Module):
 
         return -1 * metric
 
-xy = torch.tensor(np.column_stack((A.x, A.y)))
-tid = torch.tensor(A.image.values.T)
-
-result_list = []
-NITER = 10
-for iteration in range(NITER):
-    model = CenterModel(np.random.rand(2) * 200, 100 + np.random.rand() * 100 + np.random.rand(tid.shape[1]) * 10)
-    print(f"iteration: {iteration + 1} / {NITER}")
-    # optimizer = torch.optim.LBFGS(model.parameters(), 1)
-    optimizer = torch.optim.Adam(model.parameters(), 1)
-    def closure():
-        optimizer.zero_grad()
-        data_loss = model(xy, tid)
-        reg_loss = torch.var(torch.diff(model.wavelength))
-        loss = data_loss + .001 * reg_loss
-        loss.backward()
-        return loss
-    for epoch in tqdm.trange(400):
-        optimizer.step(closure)
-    result_list.append(model.get_result())
-
 
 class StationaryCenterFinder:
-    def __init__(self, max_iter, learning_rate, improvement, steps):
+    def __init__(self, max_iter, learning_rate, num_starts, reg_strength):
         self.max_iter = max_iter
         self.learning_rate = learning_rate
-        self.stopper = EarlyStopping(improvement, steps)
+        self.num_starts = num_starts
+        self.reg_strength = reg_strength
 
-    def __call__(self, c0, w, x, y, tec):
-        model = CorrelationModel(c0, w)
-        r = torch.tensor(np.column_stack([x, y]))
+    def __call__(self, c0, w0, x, y, tec):
+        logger.info("initialization | center: %s | wavelength: %s", str(c0), str(w0))
+        xy = torch.tensor(np.column_stack((x, y)))
         tid = torch.tensor(tec)
 
-        optimizer = torch.optim.Adam(
-            model.parameters(), self.learning_rate, maximize=True
-        )
-        for epoch in range(self.max_iter):
-            model.zero_grad()
-            metric = model(r, tid)
-            metric.backward()
-            optimizer.step()
-            if self.stopper.should_stop(metric.item(), epoch):
-                break
-        
-        return model.get_result(self.stopper.best_epoch)
+        result_list = []
+        for iteration in range(self.num_starts):
+            model = CenterModel(
+                c0 + np.random.rand(2) * 200 - 100,
+                w0 + np.random.rand() * 50 + np.random.rand(tec.shape[1]) * 10 - 30,
+            )
+            logger.info("iteration: %d / %d", iteration + 1, self.num_starts)
+            optimizer = torch.optim.Adam(model.parameters(), self.learning_rate)
+            for step in range(self.max_iter):
+                model.zero_grad()
+                data_loss = model(xy, tid)
+                reg_loss = torch.var(torch.diff(model.wavelength))
+                loss = data_loss + self.reg_strength * reg_loss
+                loss.backward()
+                optimizer.step()
+            result_list.append(model.get_result())
+        best_iteration = np.argmax([r["metric"] for r in result_list])
+        result = result_list[best_iteration]
+
+        fig, ax = plot_center_finder_fit(result_list)
+        fig.savefig("plots/center_finder_fit.png")
+        plt.close(fig)
+
+        return result
