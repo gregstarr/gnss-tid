@@ -7,17 +7,17 @@ from tqdm import autonotebook
 from .spectral import find_center
 
 
-def plot_circles(center, wavelength, offset, ax=None, data=None):
+def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):
     if ax is None:
         ax = plt.gca()
     artists = []
-    if data is not None:
+    if data is not None and maxr is None:
         artists.append(
             data.plot.scatter(ax=ax, x="x", y="y", hue="tec", vmax=.3, add_colorbar=False)
         )
         maxr = min(np.max(data.x.values - center[0]), np.max(data.y.values - center[1])) * .9
-    else:
-        maxr = 1200
+    elif maxr is None:
+        raise ValueError("specify maxr")
     artists += ax.plot(center[0], center[1], 'k+')
     for radius in np.arange((-1 * offset) % wavelength, maxr, wavelength):
         circle = plt.Circle(center, radius, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
@@ -119,7 +119,7 @@ def plot_center_finder_fit(result_list, s=4):
     return fig, ax
 
 
-def make_animation(data, save_fn, limit=-1, writer="pillow"):
+def make_animation(data, save_fn, limit=-1, writer="pillow", maxr=1200):
     with plt.style.context("bmh"):
         layout = [
             ["A", "B"],
@@ -150,7 +150,12 @@ def make_animation(data, save_fn, limit=-1, writer="pillow"):
                 data.isel(time=ii).image.drop_vars("time").plot(ax=ax["E"], vmax=.3, add_colorbar=False)
             ]
 
-            frame_artists += plot_circles(data.center, data.wavelength.isel(time=ii), data.offset.isel(time=ii), ax=ax["E"])
+            frame_artists += plot_circles(
+                data.center,
+                data.wavelength.isel(time=ii),
+                data.offset.isel(time=ii),
+                ax=ax["E"], maxr=maxr,
+            )
 
             animation_artists.append(frame_artists)
 

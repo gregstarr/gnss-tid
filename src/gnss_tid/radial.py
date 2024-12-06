@@ -164,7 +164,7 @@ class StationaryCenterFinder:
                 c0 + np.random.rand(2) * 500 - 250,
                 w0 + np.random.rand() * 50 + np.random.rand(tec.shape[1]) * 10 - 30,
             )
-            logger.info("iteration: %d / %d", iteration + 1, self.num_starts)
+            logger.info("iteration: %2d / %2d", iteration + 1, self.num_starts)
             optimizer = torch.optim.Adam(model.parameters(), self.learning_rate)
             for step in range(self.max_iter):
                 model.zero_grad()
@@ -174,6 +174,8 @@ class StationaryCenterFinder:
                 loss.backward()
                 optimizer.step()
             result_list.append(model.get_result())
+            logger.info("metric: %f", result_list[-1]["metric"])
+            logger.info("center: [%f, %f]", result_list[-1]["center"][0], result_list[-1]["center"][1])
         best_iteration = np.argmax([r["metric"] for r in result_list])
         result = result_list[best_iteration]
 
