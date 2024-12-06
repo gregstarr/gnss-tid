@@ -124,6 +124,9 @@ class PointData:
             return None
         local_coords = Local2D.from_geodetic(*self.get_coord_center(), h)
         x, y = local_coords.convert_from_spherical(data.lat.values, data.lon.values)
-        data = data.assign(x=(data.tec.dims, x), y=(data.tec.dims, y))
-
+        data = (
+            data.assign(x=(data.tec.dims, x), y=(data.tec.dims, y))
+            .where(abs(data.tec) < abs(data.tec).quantile(.998), drop=True)
+        )
+        
         return data

@@ -17,10 +17,11 @@ class ImageMaker(Protocol):
 
 
 class MetpyImageMaker:
-    def __init__(self, hres, hp_freq=.05, **kwargs):
+    def __init__(self, hres, hp_freq=.05, neighbor_radius=100, **kwargs):
         self.kwargs = kwargs
         self.hp_freq = hp_freq
         self.hres = hres
+        self.neighbor_radius = neighbor_radius
         self.points = None
         self.shape = None
         self.xp = None
@@ -47,7 +48,9 @@ class MetpyImageMaker:
 
         img[np.isnan(img)] = 0
         img = filters.butterworth(img, self.hp_freq, high_pass=True)
-        return xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
+        img = xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
+        w = self.get_data_density(x, y, self.neighbor_radius)
+        return xarray.Dataset({"image": img, "density": w})
     
     def get_data_density(self, x, y, threshold):
         pd = pairwise_distances(self.points, np.column_stack((x, y)))

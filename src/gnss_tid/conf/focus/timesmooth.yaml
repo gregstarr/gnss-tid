@@ -3,7 +3,7 @@ defaults:
   - center_finder: stationary
 
 _target_: gnss_tid.spectral.SmoothedPatchSpectral
-height_min: 160
+height_min: 150
 height_max: 400
 height_step: 10
 block_size: 32
@@ -11,6 +11,6 @@ block_step: 16
 kaiser_beta: 1
 quantile_thresh: 0
 density_thresh: 20
-dist_thresh: 100
 time_window: 15
+logscale_objective: True
 n_jobs: 10

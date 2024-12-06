@@ -45,7 +45,7 @@ def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
 def plot_center_finder(data, scale=5):
     X, Y = np.meshgrid(data.px.values, data.py.values)
     pts = np.column_stack([X.ravel(), Y.ravel()])
-    weights = data.F.values.ravel()
+    weights = np.log10(data.F.values.ravel() + 1)
     vectors = np.column_stack((data.Fx.values.ravel(), data.Fy.values.ravel()))
     cw = find_center(pts, vectors, weights)
     cu = find_center(pts, vectors, np.ones_like(weights))
@@ -81,7 +81,7 @@ def plot_center_finder(data, scale=5):
     ax[1].plot(cu[0], cu[1], 'x')
     ax[1].plot(cg[0], cg[1], 'x')
     plot_patches(data, ax=ax[1], img=False, scale_base=scale)
-    print(cu, cw, cg)
+    print(f"lsq unweighted: {cu}, lsq weighted {cw}, grid search: {cg}")
     return fig, ax
 
 

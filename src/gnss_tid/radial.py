@@ -161,7 +161,7 @@ class StationaryCenterFinder:
         result_list = []
         for iteration in range(self.num_starts):
             model = CenterModel(
-                c0 + np.random.rand(2) * 200 - 100,
+                c0 + np.random.rand(2) * 500 - 250,
                 w0 + np.random.rand() * 50 + np.random.rand(tec.shape[1]) * 10 - 30,
             )
             logger.info("iteration: %d / %d", iteration + 1, self.num_starts)

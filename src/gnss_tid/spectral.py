@@ -50,6 +50,7 @@ class BlockSpectralFocusing:
             block_step: int,
             kaiser_beta: int,
             quantile_thresh: float,
+            logscale_objective: bool,
             n_jobs: int,
         ):
         self.n_jobs = n_jobs
@@ -61,6 +62,7 @@ class BlockSpectralFocusing:
         k = kaiser(block_size, kaiser_beta)
         self.window = np.outer(k, k).reshape(1, 1, block_size, block_size)
         self.quantile_thresh = quantile_thresh
+        self.logscale_objective = logscale_objective
         if n_jobs > 1:
             self.run_time = delayed(self.run_time)
 
@@ -179,13 +181,12 @@ class BlockSpectralFocusing:
                 return
             npts.append(data.x.shape[0])
             img = self.image_maker(data.x.values, data.y.values, data.tec.values)
-            patches.append(self.get_fft_patches(img))
+            patches.append(self.get_fft_patches(img.image))
             images.append(img)
         
         data = (
             xarray.concat(images, "height")
             .assign_coords(height=self.heights)
-            .to_dataset(name="image")
             .assign(n=(["height"], npts), patch=xarray.concat(patches, "height"))
         )
         return data
@@ -202,6 +203,9 @@ class BlockSpectralFocusing:
             .rename({"x": "px", "y": "py"})
         )
         patches.values = abs(fft2(patches * self.window)) ** 2
+        if self.logscale_objective:
+            patches = np.log10(patches)
+            
         return patches
 
     def process_patches(self, data) -> xarray.Dataset:
@@ -217,30 +221,39 @@ class BlockSpectralFocusing:
 
 
 class SmoothedPatchSpectral(BlockSpectralFocusing):
-    def __init__(self, *args, time_window=15, dist_thresh=100, density_thresh=20, **kwargs):
+    def __init__(self, *args, time_window=15, density_thresh=20, **kwargs):
         super().__init__(*args, **kwargs)
         self.time_window = time_window
-        self.dist_thresh = dist_thresh
         self.density_thresh = density_thresh
 
-    def run_time(self, points, ts: slice, time, log_queue=None):
+    def run_time(self, points, ts: slice, time, log_queue=None, return_data=False):
         wlog = configure_worker_logger(log_queue)
         wlog.info("[%03d-%03d]: processing heights", ts.start, ts.stop)
         data = self.process_heights(points, ts, wlog)
         if data is None:
             return
         wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
-        data = self.process_patches(data).objective
-        return data.expand_dims(time=[time])
+        
+        patches = self.process_patches(data).expand_dims(time=[time])
+        if return_data:
+            return data.merge(patches)
+        return patches.objective
     
     def run(self, points: PointData, window: int, step: int):
         data = super().run(points, window, step)
-    
-        smoothed = np.exp(
-            np.log(data)
-            .rolling(time=self.time_window, center=True, min_periods=1)
-            .mean()
-        )
+
+        if self.logscale_objective:
+            smoothed = (
+                data
+                .rolling(time=self.time_window, center=True, min_periods=1)
+                .mean()
+            )
+        else:
+            smoothed = np.exp(
+                np.log(data)
+                .rolling(time=self.time_window, center=True, min_periods=1)
+                .mean()
+            )
         focus_height = smoothed.isel(height=smoothed.argmax(dim="height"))
 
         fig, ax = plt.subplots(figsize=(5, 6), tight_layout=True)
@@ -252,28 +265,19 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
         slices, times = points.get_time_slices(window, step)
         images = []
         patches = []
-        density = []
         for ii, ts in enumerate(slices):
             logger.info("collecting focused data %d / %d", ii, len(slices))
             height = focus_height.isel(time=ii).height.item()
             data = points.get_data(ts, height)
             img = self.image_maker(data.x.values, data.y.values, data.tec.values)
-            dd = self.image_maker.get_data_density(
-                data.x.values,
-                data.y.values,
-                self.dist_thresh,
-            )
-            p = self.get_fft_patches(img)
+            p = self.get_fft_patches(img.image)
             images.append(img)
-            density.append(dd)
             patches.append(p)
         data = (
             xarray.concat(images, "time")
-            .to_dataset(name="image")
             .assign(
                 patch=xarray.concat(patches, "time"),
                 objective=focus_height,
-                density=xarray.concat(density, "time"),
             )
             .reset_coords()
         )

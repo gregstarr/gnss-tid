@@ -1,11 +1,13 @@
 event:
   pointdata:
     files:
-      - /disk1/tid/data/2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5
+      - /disk1/tid/data/2015_0326T0000-0327T0000_all0326.yaml_30el_30s_ra.h5
     time_limits:
-      - "20150325_232000"
-      - "20150325_233100"
+      - "20150326_003000"
+      - "20150326_004100"
 
 focus:
   time_window: 5
   height_step: 30
+  center_finder:
+    num_starts: 3
