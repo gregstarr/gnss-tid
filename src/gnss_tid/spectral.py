@@ -262,13 +262,15 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
         fig.savefig("plots/objective.png")
         plt.close(fig)
 
-        slices, times = points.get_time_slices(window, step)
         images = []
         patches = []
+        slices, _ = points.get_time_slices(window, step)
         for ii, ts in enumerate(slices):
             logger.info("collecting focused data %d / %d", ii, len(slices))
             height = focus_height.isel(time=ii).height.item()
             data = points.get_data(ts, height)
+            if data is None:
+                continue
             img = self.image_maker(data.x.values, data.y.values, data.tec.values)
             p = self.get_fft_patches(img.image)
             images.append(img)
