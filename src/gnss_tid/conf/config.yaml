@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - focus: timesmooth
-  - event: "20150325"
+  - event: "20150325_short"
   # - debug
 
 output_fn: "autofocus.h5"
@@ -13,3 +13,8 @@ sample:
 hydra:
   job:
     chdir: True
+  job_logging:
+    formatters:
+      simple:
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        fmt: "[%(asctime)s][%(name)s][%(levelname)s] %(message)s"

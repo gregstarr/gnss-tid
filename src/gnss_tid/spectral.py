@@ -1,5 +1,6 @@
 import logging
 from logging.handlers import QueueHandler, QueueListener
+from os import getpid
 from pathlib import Path
 from multiprocessing import Manager
 
@@ -18,13 +19,18 @@ logger = logging.getLogger(__name__)
 
 def configure_worker_logger(log_queue=None, log_level=logging.INFO):
     if log_queue is None:
-        return logger
-    worker_logger = logging.getLogger('worker')
-    if not worker_logger.hasHandlers():
-        h = QueueHandler(log_queue)
-        worker_logger.addHandler(h)
+        return logger, None
+    worker_logger = logging.getLogger(f'worker {getpid()}')
+    handler = QueueHandler(log_queue)
+    worker_logger.addHandler(handler)
     worker_logger.setLevel(log_level)
-    return worker_logger
+    return worker_logger, handler
+
+
+def cleanup_worker_logger(worker_logger, handler):
+    if handler is None:
+        return
+    worker_logger.removeHandler(handler)
 
 
 def find_center(pts, vectors, weights):
@@ -90,7 +96,7 @@ class BlockSpectralFocusing:
     def run(self, points: PointData, window: int, step: int):
         self.initialize_image_maker(points, window, step)
 
-        logger.info("running %s", self.__class__.__name__)
+        logger.info("running %s n_jobs=%d", self.__class__.__name__, self.n_jobs)
         Path("plots").mkdir(exist_ok=True)
         slices, times = points.get_time_slices(window, step)
         if self.n_jobs > 1:
@@ -117,41 +123,46 @@ class BlockSpectralFocusing:
         root_logger = logging.getLogger()
         listener = QueueListener(q, *root_logger.handlers)
         
-        listener.start()
-        with Parallel(n_jobs=self.n_jobs) as parallel:
-            results = parallel(
-                self.run_time(points, ts, time, q) for ts, time in zip(slices, times)
-            )
-        listener.stop()
+        try:
+            listener.start()
+            with Parallel(n_jobs=self.n_jobs) as parallel:
+                results = parallel(
+                    self.run_time(points, ts, time, q) for ts, time in zip(slices, times)
+                )
+        finally:
+            listener.stop()
         return results
     
     def run_time(self, points, ts: slice, time, log_queue=None):
-        wlog = configure_worker_logger(log_queue)
-        wlog.info("[%03d-%03d]: processing heights", ts.start, ts.stop)
-        data = self.process_heights(points, ts, wlog)
-        if data is None:
-            return
-        wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
-        data = data.merge(self.process_patches(data))
-        output = (
-            data
-            .isel(height=data.objective.argmax())
-            .expand_dims(time=[time])
-            .reset_coords()
-        )
-        wlog.info("[%03d-%03d]: finding params", ts.start, ts.stop)
-        params = self.run_center_finder(points, output, ts)
-        output = output.assign(
-            cx=(["time"], [params["center"][0]]),
-            cy=(["time"], [params["center"][1]]),
-            wavelength=(["time"], [params["wavelength"]]),
-            offset=(["time"], [params["offset"]]),
-        )
-        wlog.info(
-            "[%03d-%03d]: params fit in %d iterations",
-            ts.start, ts.stop, len(params["history"]["metric"])
-        )
-        wlog.info("[%03d-%03d]: SUCCESS", ts.start, ts.stop)
+        wlog, handler = configure_worker_logger(log_queue)
+        try:
+            wlog.info("[%03d-%03d]: processing heights", ts.start, ts.stop)
+            data = self.process_heights(points, ts, wlog)
+            if data is None:
+                return
+            wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
+            data = data.merge(self.process_patches(data))
+            output = (
+                data
+                .isel(height=data.objective.argmax())
+                .expand_dims(time=[time])
+                .reset_coords()
+            )
+            wlog.info("[%03d-%03d]: finding params", ts.start, ts.stop)
+            params = self.run_center_finder(points, output, ts)
+            output = output.assign(
+                cx=(["time"], [params["center"][0]]),
+                cy=(["time"], [params["center"][1]]),
+                wavelength=(["time"], [params["wavelength"]]),
+                offset=(["time"], [params["offset"]]),
+            )
+            wlog.info(
+                "[%03d-%03d]: params fit in %d iterations",
+                ts.start, ts.stop, len(params["history"]["metric"])
+            )
+            wlog.info("[%03d-%03d]: SUCCESS", ts.start, ts.stop)
+        finally:
+            cleanup_worker_logger(wlog, handler)
         return output
     
     def run_center_finder(self, points: PointData, F, ts):
@@ -227,14 +238,17 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
         self.density_thresh = density_thresh
 
     def run_time(self, points, ts: slice, time, log_queue=None, return_data=False):
-        wlog = configure_worker_logger(log_queue)
-        wlog.info("[%03d-%03d]: processing heights", ts.start, ts.stop)
-        data = self.process_heights(points, ts, wlog)
-        if data is None:
-            return
-        wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
-        
-        patches = self.process_patches(data).expand_dims(time=[time])
+        wlog, handler = configure_worker_logger(log_queue)
+        try:
+            wlog.info("[%03d-%03d]: processing heights", ts.start, ts.stop)
+            data = self.process_heights(points, ts, wlog)
+            if data is None:
+                return
+            wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
+            
+            patches = self.process_patches(data).expand_dims(time=[time])
+        finally:
+            cleanup_worker_logger(wlog, handler)
         if return_data:
             return data.merge(patches)
         return patches.objective
@@ -254,7 +268,11 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
                 .rolling(time=self.time_window, center=True, min_periods=1)
                 .mean()
             )
-        focus_height = smoothed.isel(height=smoothed.argmax(dim="height"))
+        smooth_nonull = smoothed.dropna(dim="time")
+        focus_height = (
+            smooth_nonull.isel(height=smooth_nonull.argmax(dim="height"))
+            .reindex(time=smoothed.time)
+        )
 
         fig, ax = plt.subplots(figsize=(5, 6), tight_layout=True)
         smoothed.plot(ax=ax)
@@ -263,34 +281,41 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
         plt.close(fig)
 
         images = []
-        patches = []
-        slices, _ = points.get_time_slices(window, step)
-        for ii, ts in enumerate(slices):
-            logger.info("collecting focused data %d / %d", ii, len(slices))
+        slices, times = points.get_time_slices(window, step)
+        for ii, (ts, time) in enumerate(zip(slices, times)):
+            logger.info("collecting focused data %d / %d", ii + 1, len(slices))
             height = focus_height.isel(time=ii).height.item()
             data = points.get_data(ts, height)
             if data is None:
                 continue
             img = self.image_maker(data.x.values, data.y.values, data.tec.values)
             p = self.get_fft_patches(img.image)
+            img = img.assign(patch=p).expand_dims(time=[time])
             images.append(img)
-            patches.append(p)
+        data = xarray.concat(images, "time")
         data = (
-            xarray.concat(images, "time")
-            .assign(
-                patch=xarray.concat(patches, "time"),
-                objective=focus_height,
-            )
-            .reset_coords()
+            data.merge(self.process_patches(data))
+            .reindex(time=focus_height.time)
+            .assign(height=focus_height.height)
         )
-        data = data.merge(self.process_patches(data), compat="override")
 
+        # sparse_img = (
+        #     data[["image", "density"]]
+        #     .stack(row=("time", "x", "y"))
+        #     .reset_index("row")
+        # )
+        # sparse_img = (
+        #     sparse_img.image
+        #     .where(sparse_img.density > self.density_thresh, drop=True)
+        #     .reset_coords()
+        # )
         sparse_img = (
             data.image
             .where(data.density > self.density_thresh)
             .stack(row=("x", "y"))
             .reset_index("row")
-            .dropna(dim="row")
+            .dropna(dim="time", how="all")
+            .dropna(dim="row", how="all")
             .reset_coords()
         )
 
@@ -298,9 +323,9 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
         logger.info("params fit in %d iterations", len(params["history"]["metric"]))
         data = data.assign(
             center=("ci", params["center"]),
-            wavelength=("time", params["wavelength"]),
-            offset=("time", params["offset"]),
-            phase=("time", params["phase"]),
+            wavelength=xarray.DataArray(params["wavelength"], coords={"time": sparse_img.time}),
+            offset=xarray.DataArray(params["offset"], coords={"time": sparse_img.time}),
+            phase=xarray.DataArray(params["phase"], coords={"time": sparse_img.time}),
         )
 
         return data

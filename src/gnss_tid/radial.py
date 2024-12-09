@@ -128,12 +128,12 @@ class CenterModel(nn.Module):
             "history": self.history,
         }
 
-    def forward(self, xy, tid):
+    def forward(self, xy, tid, n_fin):
         dist = torch.linalg.vector_norm(xy - self.center, dim=1)
         phase = 2.0 * torch.pi * dist[:, None] / self.wavelength[None, :]
         phase_offset_vals = torch.linspace(0.0, 2.0 * torch.pi, 50)
         model_out = torch.cos(phase[:, :, None] + phase_offset_vals[None, None, :])
-        vals = torch.mean(model_out * tid[:, :, None], dim=0)
+        vals = torch.sum(model_out * tid[:, :, None], dim=0) / n_fin[:, None]
         m, idx = torch.max(vals, dim=1)
         metric = torch.sum(m)
         phase = phase_offset_vals[idx]
@@ -157,6 +157,9 @@ class StationaryCenterFinder:
         logger.info("initialization | center: %s | wavelength: %s", str(c0), str(w0))
         xy = torch.tensor(np.column_stack((x, y)))
         tid = torch.tensor(tec)
+        mask = torch.isfinite(tid)
+        n_fin = torch.sum(mask, dim=0)
+        torch.nan_to_num_(tid, 0)
 
         result_list = []
         for iteration in range(self.num_starts):
@@ -168,8 +171,8 @@ class StationaryCenterFinder:
             optimizer = torch.optim.Adam(model.parameters(), self.learning_rate)
             for step in range(self.max_iter):
                 model.zero_grad()
-                data_loss = model(xy, tid)
-                reg_loss = torch.var(torch.diff(model.wavelength))
+                data_loss = model(xy, tid, n_fin)
+                reg_loss = torch.mean(torch.diff(model.wavelength, 2) ** 2)
                 loss = data_loss + self.reg_strength * reg_loss
                 loss.backward()
                 optimizer.step()

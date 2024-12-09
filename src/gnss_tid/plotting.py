@@ -8,6 +8,8 @@ from .spectral import find_center
 
 
 def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):
+    if np.isnan(wavelength) or np.isnan(offset) or np.any(np.isnan(center)):
+        return []
     if ax is None:
         ax = plt.gca()
     artists = []
