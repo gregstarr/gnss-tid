@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - focus: timesmooth
-  - event: "20150325_short"
+  - event: "20150325_half"
   # - debug
 
 output_fn: "autofocus.h5"

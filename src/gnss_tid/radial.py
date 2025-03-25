@@ -162,9 +162,10 @@ class StationaryCenterFinder:
         torch.nan_to_num_(tid, 0)
 
         result_list = []
+        crange = 500
         for iteration in range(self.num_starts):
             model = CenterModel(
-                c0 + np.random.rand(2) * 500 - 250,
+                c0 + np.random.rand(2) * crange - crange / 2,
                 w0 + np.random.rand() * 50 + np.random.rand(tec.shape[1]) * 10 - 30,
             )
             logger.info("iteration: %2d / %2d", iteration + 1, self.num_starts)
@@ -182,7 +183,9 @@ class StationaryCenterFinder:
         best_iteration = np.argmax([r["metric"] for r in result_list])
         result = result_list[best_iteration]
 
-        fig, ax = plot_center_finder_fit(result_list)
+        fig, ax = plot_center_finder_fit(
+            result_list, c0=c0, cbox=[c0[0] - crange/2, c0[1] - crange/2, crange, crange]
+        )
         fig.savefig("plots/center_finder_fit.png")
         plt.close(fig)
 

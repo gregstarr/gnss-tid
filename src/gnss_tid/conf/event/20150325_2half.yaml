@@ -5,10 +5,10 @@ pointdata:
     - /disk1/tid/data/2015_0326T0000-0327T0000_all0326.yaml_30el_30s_ra.h5
   latitude_limits:
     - 24.0
-    - 48.0
+    - 51.0
   longitude_limits:
-    - -120.0
-    - -75.0
+    - -126.0
+    - -70.0
   time_limits:
     - "20150326_001000"
     - "20150326_020000"

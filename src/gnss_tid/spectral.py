@@ -13,6 +13,9 @@ from matplotlib import pyplot as plt
 
 from .pointdata import PointData
 from .image import ImageMaker
+from .plotting import plot_center_finder
+from .utils import find_center
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +34,6 @@ def cleanup_worker_logger(worker_logger, handler):
     if handler is None:
         return
     worker_logger.removeHandler(handler)
-
-
-def find_center(pts, vectors, weights):
-    vec_norm = np.linalg.norm(vectors, axis=1)
-    mask = vec_norm > 0
-    w = np.sqrt(weights[mask]) / vec_norm[mask]
-    A = np.column_stack([vectors[mask, 1], -vectors[mask, 0]]) * w[:, None]
-    b = np.sum(A * pts[mask], axis=1)
-    center, *_ = np.linalg.lstsq(A, b)
-    return center
 
 
 class BlockSpectralFocusing:
@@ -299,16 +292,6 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
             .assign(height=focus_height.height)
         )
 
-        # sparse_img = (
-        #     data[["image", "density"]]
-        #     .stack(row=("time", "x", "y"))
-        #     .reset_index("row")
-        # )
-        # sparse_img = (
-        #     sparse_img.image
-        #     .where(sparse_img.density > self.density_thresh, drop=True)
-        #     .reset_coords()
-        # )
         sparse_img = (
             data.image
             .where(data.density > self.density_thresh)
@@ -326,13 +309,18 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
             wavelength=xarray.DataArray(params["wavelength"], coords={"time": sparse_img.time}),
             offset=xarray.DataArray(params["offset"], coords={"time": sparse_img.time}),
             phase=xarray.DataArray(params["phase"], coords={"time": sparse_img.time}),
-        )
+        ).assign_attrs(coord_center=points.get_coord_center())
 
         return data
 
     def run_center_finder(self, data, sparse_img):
         logger.info("finding center")
         d = data.isel(time=data.objective.argmax())
+
+        fig, ax = plot_center_finder(d)
+        fig.savefig("plots/center_init.png")
+        plt.close(fig)
+
         X, Y = np.meshgrid(d.px.values, d.py.values)
         pts = np.column_stack([X.ravel(), Y.ravel()])
         weights = d.F.values.ravel()
@@ -343,3 +331,16 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
         
         result = self.center_finder(c0, w0, sparse_img.x.values, sparse_img.y.values, sparse_img.image.values.T)
         return result
+
+
+class ImageMaker(BlockSpectralFocusing):
+    def run_time(self, points, ts: slice, time, log_queue=None):
+        wlog, handler = configure_worker_logger(log_queue)
+        try:
+            wlog.info("time %03d-%03d", ts.start, ts.stop)
+            pd = points.get_data(ts, 350)
+            img = self.image_maker(pd.x.values, pd.y.values, pd.tec.values)
+            img = img.expand_dims(time=[time])
+        finally:
+            cleanup_worker_logger(wlog, handler)
+        return img
