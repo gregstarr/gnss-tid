@@ -1,3 +1,4 @@
+*.zarr
 /scratch/**
 /outputs/**
 /multirun/**
