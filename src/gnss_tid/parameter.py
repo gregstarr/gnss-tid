@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 import xarray as xr
-from scipy.fft import fft2, fftfreq
-from scipy.signal import get_window
+from scipy.fft import fft, fft2, fftfreq
+from scipy.signal.windows import kaiser
 from scipy.interpolate import make_splrep, make_smoothing_spline
 
 import gnss_tid.plotting
@@ -16,21 +16,6 @@ def get_line_coordinates(start_x, start_y, azimuth, distance):
     end_x = start_x + distance[:, None] * np.sin(azimuth_rad)[None, :]
     end_y = start_y + distance[:, None] * np.cos(azimuth_rad)[None, :]
     return end_x, end_y
-
-
-def estimate_period(lines_tec: xr.DataArray, nperseg=32, noverlap=31, nfft=1024) -> xr.DataArray:
-    minute_lines = lines_tec.assign_coords(time=np.arange(lines_tec.time.size))
-    Stt = spectrogram(minute_lines, dim="time", nperseg=nperseg, nfft=nfft, noverlap=noverlap)
-    gnss_tid.plotting.plot_param_time_fft(Stt)
-    max_comp = Stt.isel(frequency=Stt.argmax("frequency"))
-    max_comp = max_comp.where(max_comp.frequency > 0, drop=True)
-    tau = (
-        (1 / max_comp.frequency)
-        .rename("tau")
-        .reindex_like(minute_lines)
-        .assign_coords(time=lines_tec.time)
-    )
-    return tau
 
 
 def estimate_wavelength(data, lines_x, lines_y, L=800, threshold=.02, min_k=1.0e-4):
@@ -81,29 +66,6 @@ def estimate_wavelength(data, lines_x, lines_y, L=800, threshold=.02, min_k=1.0e
     return params
 
 
-def estimate_wavelength_v2(data, Nfft=256, block_size=32, step_size=8):
-    dx = (data.x[1] - data.x[0]).item()
-    wavenum = fftfreq(Nfft, dx)
-    edges = block_size // (2 * step_size)
-    win = get_window("hann", block_size)
-    win = np.outer(win, win)
-    patches = (
-        data.image
-        .rolling(y=block_size, x=block_size, center=True)
-        .construct(x="kx", y="ky", stride=step_size)
-        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
-        .pipe(lambda x: x * win)
-        .pad(kx=(0, Nfft-block_size), ky=(0, Nfft-block_size), constant_values=0)
-        .assign_coords(kx=wavenum, ky=wavenum)
-        .rename({"x": "px", "y": "py"})
-    )
-    patches.values = abs(fft2(patches)) ** 2
-    S = patches.isel(patches.argmax(dim=["kx", "ky"]))
-    k = np.hypot(S.kx, S.ky)
-    wavelength = 1 / k
-    return S
-
-
 def estimate_parameters(
         data: str | xr.Dataset,
         range_coords: np.ndarray,
@@ -142,101 +104,15 @@ def estimate_parameters(
     return params
 
 
-def estimate_parameters_v2(
-        data: str | xr.Dataset,
-        range_coords: np.ndarray,
-        az_coords: np.ndarray,
-    ) -> xr.Dataset:
-    """estimate parameters of TIDs
-
-    Args:
-        data (str | xr.Dataset): requires "image" variable, "center" attribute and
-            ["x", "y", "time"] coordinates
-
-    Returns:
-        xr.Dataset: ["tau", "wavelength", "phase_speed"]
-    """
-    if isinstance(data, str):
-        data = xr.open_dataset(data)
-    cx0, cy0 = data.center.values[0], data.center.values[1]  # TID center
-    lines_x, lines_y = get_line_coordinates(cx0, cy0, az_coords, range_coords)
-    lines_x = xr.DataArray(
-        lines_x, coords={"r": range_coords, "az": az_coords}, dims=["r", "az"]
-    )
-    lines_y = xr.DataArray(
-        lines_y, coords={"r": range_coords, "az": az_coords}, dims=["r", "az"]
-    )
-    lines_tec = data.image.interp(x=lines_x, y=lines_y)
-
-    gnss_tid.plotting.plot_param_lines(data, lines_tec)
-
-    params = estimate_wavelength_v2(data)
-    tau = estimate_period(lines_tec)
-    params = params.assign(
-        phase_speed=(params.wavelength * 1000 / (tau * 60)),
-        tau=tau,
-        tec=lines_tec,
-    )
-    return params
-
-
 def _spline_wrapper(v):
     x = np.arange(v.shape[0])
     s = make_smoothing_spline(x, v, lam=100 * x.shape[0])
     return s(x), s.derivative()(x)
 
 
-def estimate_parameters_block(data: str | xr.Dataset):
-    Nfft = 128
-    block_size = 32
-    step_size = 8
-    k_smooth_window = 3
-    phase_median_window = 3
-    wavelength_median_window = 3
-    tau_median_window = 3
-    power_threshold = .25
-
-    dx = (data.x[1] - data.x[0]).item()
-    wavenum = fftfreq(Nfft, dx)
-    edges = block_size // (2 * step_size)
-    win = get_window("hann", block_size)
-    win = np.outer(win, win)
-    if "density" in data:
-        img = data.image.where(data.density >= 10, 0)
-    else:
-        img = data.image
-    img_patches = (
-        (img / img.std(["x", "y"]))
-        .rolling(y=block_size, x=block_size, center=True)
-        .construct(x="kx", y="ky", stride=step_size)
-        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
-        .pipe(lambda x: x * win)
-        .pad(kx=(0, Nfft-block_size), ky=(0, Nfft-block_size), constant_values=0)
-        .assign_coords(kx=wavenum, ky=wavenum)
-        .rename({"x": "px", "y": "py"})
-    )
-    f = fft2(img_patches) / win.sum()
-    patch_power = xr.DataArray(abs(f) ** 2, dims=img_patches.dims, coords=img_patches.coords)
-    patch_phase = xr.DataArray(np.angle(f), dims=img_patches.dims, coords=img_patches.coords)
-    patches = xr.Dataset(dict(
-        image=img_patches,
-        power=patch_power,
-        phase=patch_phase,
-    ))
-
+def estimate_period_spline(patch_power, patch_phase, median_window=3, power_threshold=.25):
     max_idx = patch_power.where(patch_power.kx >= 0).argmax(dim=["kx", "ky"])
     Sp = patch_power.isel(max_idx)
-    k = (
-        np.hypot(Sp.kx, Sp.ky)
-        .where(Sp > power_threshold)
-        .rolling(time=k_smooth_window, center=True, min_periods=1).median()
-    )
-    wavelength = (
-        (1 / k)
-        .where(Sp > power_threshold)
-        .rolling(px=wavelength_median_window, py=wavelength_median_window, center=True, min_periods=1)
-        .median()
-    )
 
     phase = (
         patch_phase
@@ -250,7 +126,6 @@ def estimate_parameters_block(data: str | xr.Dataset):
         output_core_dims=[["time"]],
         vectorize=True,
     )
-
     smooth_phase, smooth_freq = xr.apply_ufunc(
         _spline_wrapper,
         phase,
@@ -262,20 +137,239 @@ def estimate_parameters_block(data: str | xr.Dataset):
     tau = (
         (2 * np.pi / abs(smooth_freq))
         .where(Sp > power_threshold)
-        .rolling(px=tau_median_window, py=tau_median_window, center=True, min_periods=1)
+        .rolling(px=median_window, py=median_window, center=True, min_periods=1)
         .median()
     )
+    return xr.Dataset(dict(tau=tau, phase=phase, smooth_phase=smooth_phase))
 
-    r = np.hypot(tau.px, tau.py)
-    phase_speed = wavelength * 1000 / (tau * 60)
+
+def estimate_period(
+        tec,
+        window_size = 64,
+        window_step = 1,
+        Nfft = 512,
+        power_threshold=.25,
+        kaiser_beta=6,
+    ):
+    edges = window_size // (2 * window_step)
+    win = kaiser(window_size, kaiser_beta)
+    dt = 1
+    freq = fftfreq(Nfft, dt)
+    windows = (
+        tec.rolling(time=window_size, center=True)
+        .construct(time="f", stride=window_step)
+        .isel(time=slice(edges, -edges))
+        .pipe(lambda x: x * win)
+        .pad(f=(0, Nfft-window_size), constant_values=0)
+        .assign_coords(f=freq)
+    )
+    St = xr.DataArray(
+        abs(fft(windows) / np.sum(win)) ** 2,
+        dims=windows.dims,
+        coords=windows.coords,
+    )
+    St = St.sel(f=freq>=0)
+    max_comp = St.isel(f=St.argmax("f"))
+    tau = (
+        (1 / max_comp.f)
+        .rename("tau")
+        .where(max_comp > power_threshold)
+    )
+    return xr.Dataset(dict(tau=tau, max_power=max_comp, power=St, windows=windows))
+
+
+def estimate_parameters_block(
+        data: xr.Dataset,
+        Nfft=256,
+        block_size=32,
+        step_size=8,
+        wavelength_median_window=3,
+        space_power_threshold=0.1,
+        time_power_threshold=0.2,
+        time_window=64,
+        time_nfft=512,
+        normalize=True,
+        kaiser_beta=5,
+    ):
+
+    dx = (data.x[1] - data.x[0]).item()
+    wavenum = fftfreq(Nfft, dx)
+    edges = block_size // (2 * step_size)
+    win = kaiser(block_size, kaiser_beta)
+    win = np.outer(win, win)
+
+    if "density" in data:
+        img = data.image.where(data.density >= 5, 0)
+    else:
+        img = data.image
+    
+    if normalize:
+        img = img / img.std(["x", "y"])
+    
+    img_patches = (
+        img
+        .rolling(y=block_size, x=block_size, center=True)
+        .construct(x="kx", y="ky", stride=step_size)
+        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
+        .pipe(lambda x: x * win)
+        .pad(kx=(0, Nfft-block_size), ky=(0, Nfft-block_size), constant_values=0)
+        .assign_coords(kx=wavenum, ky=wavenum)
+        .rename({"x": "px", "y": "py"})
+    )
+    
+    f = fft2(img_patches) / np.sum(win)
+    patch_power = xr.DataArray(abs(f) ** 2, dims=img_patches.dims, coords=img_patches.coords)
+    patch_phase = xr.DataArray(np.angle(f), dims=img_patches.dims, coords=img_patches.coords)
+    patches = xr.Dataset(dict(
+        image=img_patches,
+        power=patch_power,
+        phase=patch_phase,
+    ))
+
+    max_idx = patch_power.argmax(dim=["kx", "ky"])
+    Sp = patch_power.isel(**max_idx)
+    k = np.hypot(Sp.kx, Sp.ky)
+    wavelength = (
+        (1 / k)
+        .where(Sp > space_power_threshold)
+        .rolling(
+            px=wavelength_median_window,
+            py=wavelength_median_window,
+            center=True,
+            min_periods=1,
+        ).median()
+    )
+    print(f"valid patches for wavelength FFT: {(Sp > space_power_threshold).sum(['px', 'py']).mean().item()}")
+
+    tec = img.sel(x=patch_power.px, y=patch_power.py)
+    tau = estimate_period(
+        tec,
+        window_size=time_window,
+        Nfft=time_nfft,
+        power_threshold=time_power_threshold,
+    )
+    print(f"valid patches for tau FFT: {(tau.max_power > time_power_threshold).sum(['px', 'py']).mean().item()}")
+
+    r = np.hypot(img_patches.px, img_patches.py)
+    phase_speed = wavelength * 1000 / (tau.tau * 60)
+    print(f"valid phase speeds: {(~phase_speed.isnull()).sum(['px', 'py']).mean().item()}")
     params = xr.Dataset(dict(
         power=Sp,
         k=k,
         wavelength=wavelength,
-        phase=phase,
-        smooth_phase=smooth_phase,
-        tau=tau,
         r=r,
-        phase_speed=phase_speed,
     ))
+    params = params.sel(time=phase_speed.time).assign(phase_speed=phase_speed)
+    params = params.assign_attrs(
+        Nfft=Nfft,
+        block_size=block_size,
+        step_size=step_size,
+        wavelength_median_window=wavelength_median_window,
+        space_power_threshold=space_power_threshold,
+        time_power_threshold=time_power_threshold,
+        time_window=time_window,
+        time_nfft=time_nfft,
+        normalize=normalize,
+    )
+    return params, tau, patches
+
+def estimate_parameters_block_v2(
+        data: xr.Dataset,
+        Nfft=256,
+        block_size=32,
+        step_size=8,
+        smooth_win=5,
+        power_threshold=0.2,
+        normalize=True,
+        kaiser_beta=5,
+    ):
+
+    dx = (data.x[1] - data.x[0]).item()
+    wavenum = fftfreq(Nfft, dx)
+    edges = block_size // (2 * step_size)
+    win = kaiser(block_size, kaiser_beta)
+    win = np.outer(win, win)
+
+    if "density" in data:
+        img = data.image.where(data.density >= 5, 0)
+    else:
+        img = data.image
+    
+    if normalize:
+        img = img / img.std(["x", "y"])
+    
+    img_patches = (
+        img
+        .rolling(y=block_size, x=block_size, center=True)
+        .construct(x="kx", y="ky", stride=step_size)
+        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
+        .pipe(lambda x: x * win)
+        .pad(kx=(0, Nfft-block_size), ky=(0, Nfft-block_size), constant_values=0)
+        .assign_coords(kx=wavenum, ky=wavenum)
+        .rename({"x": "px", "y": "py"})
+    )
+    
+    F = fft2(img_patches) / np.sum(win)
+    patch_power = xr.DataArray(abs(F) ** 2, dims=img_patches.dims, coords=img_patches.coords)
+    patch_phase = xr.DataArray(np.angle(F), dims=img_patches.dims, coords=img_patches.coords)
+    patches = xr.Dataset(dict(
+        image=img_patches,
+        power=patch_power,
+        phase=patch_phase,
+    ))
+
+    KDIMS = ["kx", "ky"]
+    TAU = 2 * np.pi
+    TIME_DIM = np.argmax(np.array(patch_phase.dims) == "time")
+
+    phase = patch_phase.copy()  # radians
+    phase.values = np.unwrap(phase, axis=TIME_DIM) / TAU  # cycles
+    freq = (
+        phase
+        .differentiate("time", datetime_unit="s")
+        .rolling(time=smooth_win, center=True).mean()
+    )  # Hz
+
+    # set up weighted average, only keep k bins with power exceeding threshold
+    weight = patch_power.where(patch_power > power_threshold)
+    Sp = weight.sum(KDIMS)
+    weight = weight / Sp
+
+    # weighted average phase velocity and phase speed
+    k2 = phase.kx ** 2 + phase.ky ** 2
+    vx = (weight * phase.kx * freq / k2).sum(KDIMS)  # km^-1
+    vy = (weight * phase.ky * freq / k2).sum(KDIMS)  # km^-1
+    phase_speed = (
+        np.hypot(vx, vy)
+        .where(~freq.isnull().all(KDIMS))
+        .rolling(time=smooth_win, center=True).mean()
+    ) * 1000  # m^-1
+
+    wf = weight * freq * np.sign(freq.kx * vx + freq.ky * vy)
+    period = 1 / (60 * wf.sum(KDIMS))  # minutes
+    wavelength = (
+        (phase_speed * period)
+        .rolling(time=smooth_win, center=True).mean()
+     ) * 60 / 1000  # km
+
+    r = np.hypot(img_patches.px, img_patches.py)  # km
+    params = xr.Dataset(dict(
+        power=Sp,
+        phase_speed=phase_speed,
+        wavelength=wavelength,
+        period=period,
+        phase=phase,
+        freq=freq,
+        r=r,
+        vx=vx,
+        vy=vy,
+    ))
+    params = params.assign_attrs(
+        Nfft=Nfft,
+        block_size=block_size,
+        step_size=step_size,
+        smooth_win=smooth_win,
+        power_threshold=power_threshold,
+        normalize=normalize,
+    )
     return params, patches

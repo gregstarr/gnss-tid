@@ -29,10 +29,10 @@ def constant_model(
         snr (float, optional): signal to noise ratio in dB. Defaults to 0.
 
     Returns:
-        xarray.DataArray: noisy tec
+        xarray.DataArray: noisy tec image dataset (with center)
     """
     if time is None:
-        time = xarray.date_range("2025-01-01 00:00:00", "2025-01-01 01:00:00", freq="60s")
+        time = xarray.date_range("2025-01-01 00:00:00", "2025-01-01 02:00:00", freq="60s")
     time = xarray.DataArray(time, dims=["time"], name="time")
     x = xarray.DataArray(np.arange(xlim[0], xlim[1] + hres, hres), dims=["x"], name="x")
     y = xarray.DataArray(np.arange(ylim[0], ylim[1] + hres, hres), dims=["y"], name="y")
@@ -42,7 +42,9 @@ def constant_model(
     tec = np.cos(2 * np.pi * cycle)
     
     noise_factor = np.sqrt((10 ** (snr / (-10))) / 2)
+    print(f"{snr = }, {noise_factor = }")
     noise = np.random.randn(*tec.shape) * noise_factor
     noisy_tec = tec + noise
+    density = xarray.ones_like(tec) * 20
 
-    return noisy_tec
+    return xarray.Dataset({"image": noisy_tec, "density": density, "center": center})
