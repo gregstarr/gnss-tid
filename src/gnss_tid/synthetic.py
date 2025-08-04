@@ -1,6 +1,7 @@
 from numpy.typing import ArrayLike
 import numpy as np
-import xarray
+import dask.array as da
+import xarray as xr
 import pandas
 
 
@@ -14,7 +15,7 @@ def constant_model(
         hres: float = 20,
         offset: float = 0,
         snr: float = 0,
-        ) -> xarray.DataArray:
+        ) -> xr.DataArray:
     """constant center, wavelength and phase speed model
 
     Args:
@@ -29,13 +30,13 @@ def constant_model(
         snr (float, optional): signal to noise ratio in dB. Defaults to 0.
 
     Returns:
-        xarray.DataArray: noisy tec image dataset (with center)
+        xr.DataArray: noisy tec image dataset (with center)
     """
     if time is None:
-        time = xarray.date_range("2025-01-01 00:00:00", "2025-01-01 02:00:00", freq="60s")
-    time = xarray.DataArray(time, dims=["time"], name="time")
-    x = xarray.DataArray(np.arange(xlim[0], xlim[1] + hres, hres), dims=["x"], name="x")
-    y = xarray.DataArray(np.arange(ylim[0], ylim[1] + hres, hres), dims=["y"], name="y")
+        time = xr.date_range("2025-01-01 00:00:00", "2025-01-01 02:00:00", freq="60s")
+    time = xr.DataArray(time, dims=["time"], name="time")
+    x = xr.DataArray(np.arange(xlim[0], xlim[1] + hres, hres), dims=["x"], name="x")
+    y = xr.DataArray(np.arange(ylim[0], ylim[1] + hres, hres), dims=["y"], name="y")
     r = np.hypot(x - center[0], y - center[1]).rename("r").assign_coords(x=x, y=y)
     t = (time - time[0]).dt.total_seconds()
     cycle = (r - (phase_speed / 1000) * t - offset) / wavelength
@@ -45,6 +46,47 @@ def constant_model(
     print(f"{snr = }, {noise_factor = }")
     noise = np.random.randn(*tec.shape) * noise_factor
     noisy_tec = tec + noise
-    density = xarray.ones_like(tec) * 20
+    density = xr.ones_like(tec) * 20
 
-    return xarray.Dataset({"image": noisy_tec, "density": density, "center": center})
+    return xr.Dataset({"image": noisy_tec, "density": density, "center": center})
+
+
+def constant_model2(
+        time: pandas.DatetimeIndex | None = None,
+        center: ArrayLike = (100, 100),
+        snr = da.arange(-3, 2, 1),
+        wavelength = da.arange(150, 201, 50),
+        tau = da.arange(40, 51, 10),
+        xlim: ArrayLike = (-1000, 1000),
+        ylim: ArrayLike = (-1000, 1000),
+        hres: float = 20,
+        offset: float = 0,
+        ) -> xr.DataArray:
+    if time is None:
+        time = xr.date_range("2025-01-01 00:00:00", "2025-01-01 02:00:00", freq="60s")
+    coords = xr.Coordinates(dict(
+        snr=snr,
+        lam=wavelength,
+        tau=tau,
+        time=time,
+        x=da.arange(xlim[0], xlim[1] + hres, hres, chunks=-1),
+        y=da.arange(ylim[0], ylim[1] + hres, hres, chunks=-1),
+    ))
+    r = xr.ufuncs.hypot(coords["x"] - center[0], coords["y"] - center[1]).rename("r").chunk("auto").persist()
+    t = (coords["time"] - coords["time"][0]).dt.total_seconds()
+    phase_speed = coords["lam"] * 1000 / (coords["tau"] * 60)
+    cycle = (r - (phase_speed / 1000) * t - offset) / coords["lam"]
+    tec = xr.ufuncs.cos(2 * np.pi * cycle).chunk("auto").persist()
+    
+    noise_factor = xr.ufuncs.sqrt((10 ** (coords["snr"] / (-10))) / 2)
+    noise = xr.DataArray(
+        da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
+        dims=tec.dims,
+        coords=tec.coords,
+    ) * noise_factor
+    noisy_tec = tec + noise
+    density = xr.ones_like(noisy_tec, chunks=noisy_tec.chunks) * 20
+
+    data = xr.Dataset({"image": noisy_tec, "density": density, "center": center})
+    data["image"] = data["image"].rolling(x=3, y=3, center=True, min_periods=1).median()
+    return data.chunk(x=-1, y=-1, lam=1, tau=1, time=-1, snr="auto")
