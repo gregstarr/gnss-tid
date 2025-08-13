@@ -1,11 +1,4 @@
-import dask
-from dask.distributed import Client
-import dask.array as da
 import xarray
-import numpy as np
-from zarr.codecs import BloscCodec, BloscCname, BloscShuffle
-
-import gnss_tid.synthetic
 import gnss_tid.parameter
 
 
@@ -65,41 +58,12 @@ def get_template(data, block_size, step_size):
 
 
 if __name__ == "__main__":
-    dask.config.set({
-        "distributed.worker.memory.spill": 0.85,  # default: 0.7
-        "distributed.worker.memory.target": 0.75,  # default: 0.6
-        "distributed.worker.memory.terminate": 0.98,  # default: 0.95
-    })
-    client = Client(processes=True, n_workers=4, threads_per_worker=1)
-    print(client.dashboard_link)
-    
-    data_fn = "/disk1/tid/users/starr/results/data2.zarr"
-    output_fn = "results2.zarr"
-    save_data(data_fn)
-    data = xarray.open_zarr(
-        data_fn,
-        chunks=dict(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
-    )
-    print(data)
-    print()
-    print("#" * 80)
-    print("PARAMETERS")
-    print("#" * 80)
-    print()
+    file = "outputs/2024-12-06/22-20-41/autofocus.h5"
+    data = xarray.open_dataset(file)
     
     BLOCK_SIZE = 32
     STEP_SIZE = 8
     NFFT = 128
-    template = get_template(data, BLOCK_SIZE, STEP_SIZE)
 
-    params = data.map_blocks(
-        gnss_tid.parameter.estimate_parameters_block_v4,
-        kwargs={
-            "Nfft": NFFT,
-            "block_size": BLOCK_SIZE,
-            "step_size": STEP_SIZE,
-        },
-        template=template,
-    )
+    params = gnss_tid.parameter.estimate_parameters_block_v4(data, NFFT, BLOCK_SIZE, STEP_SIZE)
     print(params)
-    params.to_zarr(output_fn, mode="w")

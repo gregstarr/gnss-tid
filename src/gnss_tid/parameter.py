@@ -624,7 +624,7 @@ def estimate_parameters_block_v4(
         np.hypot(vx, vy)
         .where(~wfreq.isnull().all(KDIMS))
         .rolling(time=smooth_win, center=True, min_periods=1).mean()
-    ) * 1000  # m^-1
+    ) * 1000  # m/s
 
     wfsum = (wfreq * np.sign(kx * vx + ky * vy)).sum(KDIMS)
     period = (1 / (60 * wfsum)).where(wfsum > 0)  # minutes
