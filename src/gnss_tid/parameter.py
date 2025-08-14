@@ -1,19 +1,20 @@
-import pickle
+import itertools
+import time
 
 import dask
 import numba
 import numpy as np
-import pandas as pd
 import xarray as xr
-import dask
-import dask.array as da
-from dask.array.fft import fft2 as dafft2
-from dask.utils import format_bytes
 from scipy.fft import fft, fft2, fftfreq
 from scipy.signal.windows import kaiser
 from scipy.interpolate import make_splrep, make_smoothing_spline
 
-import gnss_tid.plotting
+import hvplot
+import hvplot.xarray
+import holoviews as hv
+from holoviews import opts
+import colorcet as cc
+from bokeh.models import PrintfTickFormatter
 
 
 def estimate_noise_hs74(spectrum, navg=1, nnoise_min=1):
@@ -381,147 +382,6 @@ def estimate_parameters_block_v2(
     return params, patches
 
 
-def estimate_parameters_block_v3(
-        patches: xr.Dataset,
-        smooth_win=5,
-    ) -> xr.Dataset:
-    
-    KDIMS = ["kx", "ky"]
-    graph_size("patches", patches)
-
-    kx = patches.kx.persist()
-    ky = patches.ky.persist()
-
-    # set up weighted average, only keep k bins with power exceeding threshold
-    pmed = patches.power.median(KDIMS)
-    psig = 1.4826 * abs(patches.power - pmed).median(KDIMS)
-    threshold = pmed + 50 * psig
-    weight = patches.power.where(patches.power > threshold)
-    Sp = weight.sum(KDIMS)
-    weight = (weight / Sp).persist()
-    graph_size("weight", weight)
-    # if use_threshold:
-    #     nsig = (patches.power > threshold).sum(KDIMS)
-    #     pnoise = patches.power.where(patches.power < threshold).mean(KDIMS) * nsig
-    #     snr = (Sp - pnoise) / pnoise
-    # else:
-    #     snr = Sp
-
-    freq = (
-        patches.phase.differentiate("time", datetime_unit="s") # Hz
-        .rolling(time=smooth_win, center=True, min_periods=1)
-        .mean()
-    )
-    graph_size("freq", freq)
-
-    # weighted average phase velocity and phase speed
-    wfreq = (weight * freq).persist()
-    k2 = kx ** 2 + ky ** 2
-    wf_over_k2 = wfreq / k2
-    # vx = (kx * f_over_k2).weighted(weight).mean(KDIMS)
-    # vy = (ky * f_over_k2).weighted(weight).mean(KDIMS)
-    vx = (kx * wf_over_k2).sum(KDIMS)  # km^-1
-    graph_size("vx", vx)
-    vy = (ky * wf_over_k2).sum(KDIMS)  # km^-1
-    graph_size("vy", vy)
-    phase_speed = (
-        xr.ufuncs.hypot(vx, vy)
-        .rolling(time=smooth_win, center=True, min_periods=1)
-        .mean() * 1000
-     ).persist()
-    graph_size("phase_speed", phase_speed)
-
-    # k = np.sqrt(k2)
-    # Rx = (weight * abs(phase.kx) / k).sum(KDIMS)
-    # Ry = (weight * abs(phase.ky) / k).sum(KDIMS)
-    # coherence = np.hypot(Rx, Ry)
-
-    wfreq = (wfreq * xr.ufuncs.sign(kx * vx + ky * vy)).sum(KDIMS)
-    period = (1 / (60 * wfreq)).where(wfreq > 0)  # minutes
-    wavelength = (phase_speed * period) * 60 / 1000  # km
-    graph_size("wavelength", wavelength)
-
-    # r = xr.ufuncs.hypot(img_patches.px, img_patches.py)  # km
-    params = xr.Dataset(dict(
-        # power=Sp,
-        phase_speed=phase_speed,
-        wavelength=wavelength,
-        period=period,
-        # phase=phase,
-        # freq=freq,
-        # r=r,
-        vx=vx,
-        vy=vy,
-        # snr=snr,
-        # coherence=coherence,
-    )).chunk(time=-1, px=-1, py=-1, lam="auto", tau="auto", snr="auto")
-    return params
-
-
-def graph_size(name, coll):
-    # Get the raw dict of tasks
-    dsk = coll.__dask_graph__().to_dict()
-    n_tasks = len(dsk)
-    n_bytes = len(pickle.dumps(dsk))
-    print(f"{name:8s} → {n_tasks:7d} tasks, graph is {format_bytes(n_bytes)}")
-
-
-def get_patches(
-        data: xr.Dataset,
-        Nfft=256,
-        block_size=32,
-        step_size=8,
-        kaiser_beta=5,
-    ) -> xr.Dataset:
-    graph_size("data", data)
-
-    dx = (data.x[1] - data.x[0]).item()
-    wavenum = da.fft.fftfreq(Nfft, dx, chunks=-1)
-    edges = block_size // (2 * step_size)
-    win = kaiser(block_size, kaiser_beta)
-    win = da.from_array(win, chunks=-1)
-    win = da.outer(win, win).persist()
-    winsum = da.sum(win).persist()
-
-    if "density" in data:
-        img = data.image.where(data.density >= 5, 0)
-    else:
-        img = data.image
-    
-    graph_size("img", img)
-    
-    img_patches = (
-        img
-        .rolling(y=block_size, x=block_size, center=True)
-        .construct(
-            x="kx",
-            y="ky",
-            stride=step_size,
-            sliding_window_view_kwargs={"automatic_rechunk": False}
-        )
-        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
-        .rename({"x": "px", "y": "py"})
-        .chunk(ky=-1, kx=-1, time=-1, py="auto", tau="auto", px="auto", lam="auto", snr="auto")
-    )
-    graph_size("img_patches", img_patches)
-    
-    KX = np.argmax(np.array(img_patches.dims) == "kx").item()
-    KY = np.argmax(np.array(img_patches.dims) == "ky").item()
-    TIME_DIM = np.argmax(np.array(img_patches.dims) == "time").item()
-    TAU = 2 * np.pi
-
-    F = dafft2(img_patches.data * win, [Nfft, Nfft], [KX, KY])
-    power = (da.abs(F) / winsum) ** 2
-    graph_size("power", power)
-    phase = da.apply_gufunc(np.unwrap, "()->()", da.angle(F), axis=TIME_DIM) / TAU  # cycles
-    graph_size("phase", phase)
-
-    coords = img_patches.coords.assign(kx=wavenum, ky=wavenum)
-    return xr.Dataset({
-        "power": xr.DataArray(power, coords, coords.dims),
-        "phase": xr.DataArray(phase, coords, coords.dims),
-    })
-
 
 KDIMS = ["kx", "ky"]
 TAU = 2 * np.pi
@@ -643,3 +503,187 @@ def estimate_parameters_block_v4(
         coherence=coherence,
     ))
     return params
+
+
+def estimate_parameters_block_debug(
+        data: xr.Dataset,
+        Nfft=256,
+        block_size=32,
+        step_size=8,
+        smooth_win=9,
+        kaiser_beta=5,
+    ):
+    t0 = time.perf_counter()
+    print("start")
+    hres = (data.x[1] - data.x[0]).item()
+    edges = block_size // (2 * step_size)
+    window = kaiser(block_size, kaiser_beta)
+    window = np.outer(window, window) / np.sum(window)
+
+    if "density" in data:
+        img = data.image.where(data.density >= 5, 0)
+    else:
+        img = data.image
+        
+    params = xr.Dataset()
+    img_patches = (
+        img
+        .rolling(y=block_size, x=block_size, center=True)
+        .construct(x="kx", y="ky", stride=step_size)
+        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
+        .rename({"x": "px", "y": "py"})
+    )
+    print("patches")
+
+    wavenum = fftfreq(Nfft, hres)
+    
+    params["F"] = (
+        xr.apply_ufunc(
+            lambda x: fft2(x * window, s=(Nfft, Nfft)),
+            img_patches,
+            input_core_dims=[KDIMS],
+            output_core_dims=[KDIMS],
+            output_dtypes=[np.complex128],
+            dask_gufunc_kwargs={"output_sizes": {"kx": Nfft, "ky": Nfft}},
+            dask="parallelized",
+            exclude_dims={"kx", "ky"}
+        )
+        .assign_coords(kx=wavenum, ky=wavenum)
+        .sortby("kx").sortby("ky")
+    )
+    params["img_patches"] = img_patches.rename({"kx": "dx", "ky": "dy"})
+    if dask.is_dask_collection(params):
+        params = params.chunk({"time": -1})
+    print("fft")
+
+    params["power"] = abs(params["F"]) ** 2
+    print("power")
+
+    # set up weighted average, only keep k bins with power exceeding threshold
+    threshold = params["power"].quantile(.95, KDIMS)
+    params["weight"] = params["power"].where(params["power"] > threshold)
+    params["weight"] = params["weight"] / params["weight"].sum(KDIMS)
+
+    print("weight")
+
+    params["phase"] = xr.apply_ufunc(
+        np.unwrap,
+        xr.ufuncs.angle(params["F"]),
+        input_core_dims=[["time"]],
+        output_core_dims=[["time"]],
+        dask="parallelized",
+    ) / TAU
+    print("phase")
+
+    params["freq"] = params["phase"].differentiate("time", datetime_unit="s")
+    freq_noise_power = params["freq"].rolling(time=smooth_win, center=True, min_periods=1).var()
+    params["freq"] = params["freq"].rolling(time=smooth_win, center=True, min_periods=1).mean()
+    params["freq_snr"] = (params["freq"]**2 / freq_noise_power)
+    params["patch_freq_snr"] = (params["freq_snr"] * params["weight"]).sum(KDIMS)
+    print("freq")
+    
+    # weighted average phase velocity and phase speed
+    k = params.kx + params.ky * 1j
+    k2 = k ** 2
+    params["phase_velocity"] = (params["weight"] * k * params["freq"] / abs(k)**2).sum(KDIMS)
+    params["phase_speed"] = abs(params["phase_velocity"]) * 1000  # m/s
+    print("phase velocity")
+
+    S0 = (params["weight"] * k * k.conj()).sum(KDIMS)
+    S2 = (params["weight"] * k2).sum(KDIMS)
+
+    params["K_rms"] = xr.ufuncs.sqrt(abs((params["weight"] * k2).sum(KDIMS)))
+    unit_k2 = k2 / abs(k2)
+    params["coherence"] = abs((params["weight"] * unit_k2).sum(KDIMS))
+    print("coherence and K_rms")
+
+    direction = xr.ufuncs.sign((k.conj() * params["phase_velocity"]).real)
+    weighted_freq_mean = (params["weight"] * params["freq"] * direction).sum(KDIMS)
+    params["period"] = (1 / (60 * weighted_freq_mean)).where(weighted_freq_mean > 0)  # minutes
+    params["wavelength"] = params["phase_speed"] * params["period"] * 60 / 1000  # km
+    print("period / wavelength")
+    
+    if dask.is_dask_collection(params):
+        img.load()
+        params.load()
+    print("load")
+    def plotter(time, x, y, kx, ky):
+        txy = params.sel(time=time, px=x, py=y)
+        kxy = params.sel(px=x, py=y, kx=kx, ky=ky)
+        pxy = params.sel(px=x, py=y)
+        
+        tec_plot = (
+            hv.Image(img.sel(time=time))
+            .opts(cmap=cc.cm.diverging_bwr_55_98_c37, colorbar=True, clim=(-.3, .3)) *
+            hv.Points((x, y), kdims=["x", "y"]).opts(color="k")
+        )
+
+        patch_plot = (
+            hv.Image(txy["img_patches"].data[::-1], kdims=["xp", "yp"])
+            .opts(cmap=cc.cm.diverging_bwr_55_98_c37, clim=(-.3, .3))
+        )
+
+        weight_plot = (
+            hv.Image(txy["weight"])
+            .opts(cmap=cc.cm.gouldian, colorbar=True) *
+            hv.Points((kx, ky), kdims=["kx", "ky"]).opts(color="r")
+        )
+
+        power_plot = (
+            hv.Image(txy["power"])
+            .opts(cmap=cc.cm.gouldian, colorbar=True)
+        )
+        levels = txy["power"].quantile([.8, .95], KDIMS).values
+        power_plot = hv.operation.contours(power_plot, levels=levels, overlaid=True)
+
+        freq_img_plot = (
+            hv.Image(txy["freq_snr"])
+            .opts(cmap=cc.cm.gouldian, colorbar=True) *
+            hv.Points((kx, ky), kdims=["kx", "ky"]).opts(color="r")
+        )
+
+        wf_plot = (
+            hv.Image(txy["weight"] * txy["freq"])
+            .opts(cmap=cc.cm.diverging_bwr_55_98_c37, colorbar=True) *
+            hv.Points((kx, ky), kdims=["kx", "ky"]).opts(color="k")
+        )
+
+        freq_plot = hv.Curve(kxy["freq"]) * hv.VLine(time)
+        freq_snr_plot = hv.Curve(kxy["freq_snr"]) * hv.Curve(pxy["patch_freq_snr"]) * hv.VLine(time)
+        coherence_plot = hv.Curve(pxy["coherence"]) * hv.VLine(time)
+        
+        layout = (
+            coherence_plot.opts(frame_width=250) + 
+            tec_plot.opts(frame_width=400) +
+            patch_plot.opts(frame_width=250) +
+
+            wf_plot.opts(frame_width=250, title="weight * freq") +
+            weight_plot.opts(frame_width=250, title="weight") +
+            power_plot.opts(frame_width=250, legend_position='right', title="power") +
+
+            freq_snr_plot.opts(frame_width=250, logy=True) +
+            freq_plot.opts(frame_width=250) +
+            freq_img_plot.opts(frame_width=250, title="SNR[f]")
+        )
+        return layout.opts(
+            opts.Points(marker="x", size=15),
+            opts.VLine(line_width=2, color="k"),
+            opts.Curve(show_grid=True),
+            opts.Image(
+                data_aspect=1,
+                axiswise=True,
+                framewise=True,
+                cformatter=PrintfTickFormatter(format="%.2e"),
+            ),
+        ).cols(3)
+
+    
+    plot = (
+        hv.DynamicMap(plotter, kdims=["time", "x", "y", "kx", "ky"])
+        .redim.values(time=img.time.values, x=params.px.values, y=params.py.values, kx=params.kx.values, ky=params.kx.values)
+    )
+
+    print(plot)
+    
+    print((time.perf_counter() - t0) / 60)
+    return plot
