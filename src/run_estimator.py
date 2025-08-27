@@ -28,5 +28,5 @@ if __name__ == "__main__":
     STEP_SIZE = 8
     NFFT = 128
 
-    plots = gnss_tid.parameter.estimate_parameters_block_debug(data, NFFT, BLOCK_SIZE, STEP_SIZE)
+    plots = gnss_tid.parameter.estimate_parameters_block_debug(data.isel(time=slice(-20, None)), NFFT, BLOCK_SIZE, STEP_SIZE)
     hvplot.show(plots)

@@ -9,12 +9,12 @@ from scipy.fft import fft, fft2, fftfreq
 from scipy.signal.windows import kaiser
 from scipy.interpolate import make_splrep, make_smoothing_spline
 
-import hvplot
 import hvplot.xarray
 import holoviews as hv
 from holoviews import opts
 import colorcet as cc
 from bokeh.models import PrintfTickFormatter
+import panel as pn
 
 
 def estimate_noise_hs74(spectrum, navg=1, nnoise_min=1):
@@ -561,6 +561,7 @@ def estimate_parameters_block_debug(
 
     # set up weighted average, only keep k bins with power exceeding threshold
     threshold = params["power"].quantile(.95, KDIMS)
+    params["power_threshold"] = threshold
     params["weight"] = params["power"].where(params["power"] > threshold)
     params["weight"] = params["weight"] / params["weight"].sum(KDIMS)
 
@@ -586,6 +587,7 @@ def estimate_parameters_block_debug(
     k = params.kx + params.ky * 1j
     k2 = k ** 2
     params["phase_velocity"] = (params["weight"] * k * params["freq"] / abs(k)**2).sum(KDIMS)
+    params["phase_velocity_angle"] = xr.ufuncs.angle(params["phase_velocity"])
     params["phase_speed"] = abs(params["phase_velocity"]) * 1000  # m/s
     print("phase velocity")
 
@@ -607,15 +609,37 @@ def estimate_parameters_block_debug(
         img.load()
         params.load()
     print("load")
+
+    L = 500
+    opts.defaults(
+        opts.Points(marker="x", size=15),
+        opts.VLine(line_width=2, color="k"),
+        opts.Curve(show_grid=True, width=L, height=L-100),
+        opts.Image(
+            axiswise=True,
+            framewise=True,
+            cformatter=PrintfTickFormatter(format="%.2e"),
+            width=L,
+            height=L-100,
+        ),
+    )
+    
     def plotter(time, x, y, kx, ky):
-        txy = params.sel(time=time, px=x, py=y)
-        kxy = params.sel(px=x, py=y, kx=kx, ky=ky)
-        pxy = params.sel(px=x, py=y)
+        txy = params.isel(time=time, px=x, py=y)
+        kxy = params.isel(px=x, py=y, kx=kx, ky=ky)
+        pxy = params.isel(px=x, py=y)
         
         tec_plot = (
-            hv.Image(img.sel(time=time))
+            hv.Image(img.isel(time=time))
             .opts(cmap=cc.cm.diverging_bwr_55_98_c37, colorbar=True, clim=(-.3, .3)) *
-            hv.Points((x, y), kdims=["x", "y"]).opts(color="k")
+            hv.Points((params.px.values[x], params.py.values[y]), kdims=["x", "y"])
+            .opts(color="k") *
+            hv.VectorField(
+                params.isel(time=time),
+                kdims=["px", "py"],
+                vdims=["phase_velocity_angle", "phase_speed", "coherence", "power_threshold"],
+            )
+            .opts(magnitude="power_threshold", color="coherence", clim=(.2, .8), cmap=cc.cm.kg)
         )
 
         patch_plot = (
@@ -623,67 +647,127 @@ def estimate_parameters_block_debug(
             .opts(cmap=cc.cm.diverging_bwr_55_98_c37, clim=(-.3, .3))
         )
 
-        weight_plot = (
-            hv.Image(txy["weight"])
-            .opts(cmap=cc.cm.gouldian, colorbar=True) *
-            hv.Points((kx, ky), kdims=["kx", "ky"]).opts(color="r")
-        )
-
         power_plot = (
             hv.Image(txy["power"])
             .opts(cmap=cc.cm.gouldian, colorbar=True)
         )
         levels = txy["power"].quantile([.8, .95], KDIMS).values
-        power_plot = hv.operation.contours(power_plot, levels=levels, overlaid=True)
+        power_plot = (
+            hv.operation.contours(power_plot, levels=levels, overlaid=True)
+            .opts(show_legend=False) *
+            hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="r")
+        )
 
         freq_img_plot = (
             hv.Image(txy["freq_snr"])
             .opts(cmap=cc.cm.gouldian, colorbar=True) *
-            hv.Points((kx, ky), kdims=["kx", "ky"]).opts(color="r")
+            hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="r")
         )
 
         wf_plot = (
             hv.Image(txy["weight"] * txy["freq"])
             .opts(cmap=cc.cm.diverging_bwr_55_98_c37, colorbar=True) *
-            hv.Points((kx, ky), kdims=["kx", "ky"]).opts(color="k")
+            hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="k")
         )
 
-        freq_plot = hv.Curve(kxy["freq"]) * hv.VLine(time)
-        freq_snr_plot = hv.Curve(kxy["freq_snr"]) * hv.Curve(pxy["patch_freq_snr"]) * hv.VLine(time)
-        coherence_plot = hv.Curve(pxy["coherence"]) * hv.VLine(time)
+        freq_plot = hv.Curve(kxy["freq"]) * hv.VLine(params.time.values[time])
+        freq_snr_plot = hv.Curve(kxy["freq_snr"]) * hv.Curve(pxy["patch_freq_snr"]) * hv.VLine(params.time.values[time])
+        coherence_plot = hv.Curve(pxy["coherence"]) * hv.VLine(params.time.values[time])
+
+        tec_plot.opts(width=2*L, height=L-100, title="TEC + Phase Velocity [time]")
+
+        layout = pn.GridSpec()
+        layout[0, 0] = coherence_plot.opts(title="Coherence [x, y]")
+        layout[1, 0] = freq_snr_plot.opts(logy=True, title="Freq SNR [x, y]")
+        layout[2, 0] = freq_plot.opts(title="Freq [x, y]")
         
-        layout = (
-            coherence_plot.opts(frame_width=250) + 
-            tec_plot.opts(frame_width=400) +
-            patch_plot.opts(frame_width=250) +
-
-            wf_plot.opts(frame_width=250, title="weight * freq") +
-            weight_plot.opts(frame_width=250, title="weight") +
-            power_plot.opts(frame_width=250, legend_position='right', title="power") +
-
-            freq_snr_plot.opts(frame_width=250, logy=True) +
-            freq_plot.opts(frame_width=250) +
-            freq_img_plot.opts(frame_width=250, title="SNR[f]")
-        )
-        return layout.opts(
-            opts.Points(marker="x", size=15),
-            opts.VLine(line_width=2, color="k"),
-            opts.Curve(show_grid=True),
-            opts.Image(
-                data_aspect=1,
-                axiswise=True,
-                framewise=True,
-                cformatter=PrintfTickFormatter(format="%.2e"),
-            ),
-        ).cols(3)
-
+        layout[0, 1:] = tec_plot
+        
+        layout[1, 1] = patch_plot.opts(title="Patch [x, y]")
+        layout[1, 2] = wf_plot.opts(title="weight * freq [x, y]")
+        layout[2, 1] = power_plot.opts(title="power [x, y]")
+        layout[2, 2] = freq_img_plot.opts(title="Freq SNR")
+        
+        return layout
     
-    plot = (
-        hv.DynamicMap(plotter, kdims=["time", "x", "y", "kx", "ky"])
-        .redim.values(time=img.time.values, x=params.px.values, y=params.py.values, kx=params.kx.values, ky=params.kx.values)
-    )
+    time_slider = pn.widgets.IntSlider(start=0, end=img.time.shape[0]-1, step=1, name="time")
+    x_slider = pn.widgets.IntSlider(start=0, end=params.px.shape[0]-1, step=1, name="x")
+    y_slider = pn.widgets.IntSlider(start=0, end=params.py.shape[0]-1, step=1, name="y")
+    kx_slider = pn.widgets.IntSlider(start=0, end=params.kx.shape[0]-1, step=1, name="kx")
+    ky_slider = pn.widgets.IntSlider(start=0, end=params.ky.shape[0]-1, step=1, name="ky")
 
-    print(plot)
+    box = pn.Row(
+        time_slider,
+        x_slider,
+        y_slider,
+        kx_slider,
+        ky_slider,
+    )
+    
+    plot = pn.bind(plotter, time=time_slider, x=x_slider, y=y_slider, kx=kx_slider, ky=ky_slider)
+
+    layout = pn.Column(box, plot)
     
     print((time.perf_counter() - t0) / 60)
-    return plot
+    return layout
+
+
+
+def plotter2(time, x, y, kx, ky):
+    txy = params.isel(time=time, px=x, py=y)
+    kxy = params.isel(px=x, py=y, kx=kx, ky=ky)
+    pxy = params.isel(px=x, py=y)
+    
+    tec_plot = pn.pane.HoloViews(
+        hv.Image(img.isel(time=time))
+        .opts(
+            cmap=cc.cm.diverging_bwr_55_98_c37,
+            colorbar=True,
+            clim=(-.3, .3),
+            title="TEC",
+        ) *
+        hv.Points((params.px.values[x], params.py.values[y]), kdims=["x", "y"]).opts(color="k")
+    )
+
+    patch_plot = pn.pane.HoloViews(
+        hv.Image(txy["img_patches"].data[::-1], kdims=["xp", "yp"])
+        .opts(cmap=cc.cm.diverging_bwr_55_98_c37, clim=(-.3, .3), title="Patch")
+    )
+
+    power_plot = (
+        hv.Image(txy["power"])
+        .opts(cmap=cc.cm.gouldian, colorbar=True, title="Power with threshold levels")
+    )
+    levels = txy["power"].quantile([.8, .95], KDIMS).values
+    power_plot = pn.pane.HoloViews(
+        hv.operation.contours(power_plot, levels=levels, overlaid=True) *
+        hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="r")
+    )
+
+    freq_img_plot = pn.pane.HoloViews(
+        hv.Image(txy["freq_snr"])
+        .opts(cmap=cc.cm.gouldian, colorbar=True, title="Freq SNR") *
+        hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="r")
+    )
+
+    wf_plot = pn.pane.HoloViews(
+        hv.Image(txy["weight"] * txy["freq"])
+        .opts(cmap=cc.cm.diverging_bwr_55_98_c37, colorbar=True, title="Freq * weight") *
+        hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="k")
+    )
+
+    freq_plot = pn.pane.HoloViews(hv.Curve(kxy["freq"]) * hv.VLine(img.time.values[time]))
+    freq_snr_plot = pn.pane.HoloViews(hv.Curve(kxy["freq_snr"]) * hv.Curve(pxy["patch_freq_snr"]) * hv.VLine(img.time.values[time]))
+    coherence_plot = pn.pane.HoloViews(hv.Curve(pxy["coherence"]) * hv.VLine(img.time.values[time]))
+
+    layout = pn.GridSpec(width=1000, height=1000)
+    layout[0, 2] = patch_plot
+    layout[1, 0] = coherence_plot
+    layout[1, 1] = power_plot
+    layout[1, 2] = wf_plot
+    layout[2, 0] = freq_img_plot
+    layout[2, 1] = freq_snr_plot
+    layout[2, 2] = freq_plot
+    layout[0, 0:2] = tec_plot
+    
+    return layout
