@@ -63,7 +63,11 @@ def constant_model2(
         offset: float = 0,
         ) -> xr.DataArray:
     if time is None:
-        time = xr.date_range("2025-01-01 00:00:00", "2025-01-01 02:00:00", freq="60s")
+        start = np.datetime64("2025-01-01T00:00:00")
+        stop  = np.datetime64("2025-01-01T02:00:00")
+        step  = np.timedelta64(60, "s")   # 60 seconds
+        time = da.arange(start, stop + step, step, dtype="M8[ns]", chunks=1)
+    
     coords = xr.Coordinates(dict(
         snr=snr,
         lam=wavelength,
@@ -72,13 +76,13 @@ def constant_model2(
         x=da.arange(xlim[0], xlim[1] + hres, hres, chunks=-1),
         y=da.arange(ylim[0], ylim[1] + hres, hres, chunks=-1),
     ))
-    r = xr.ufuncs.hypot(coords["x"] - center[0], coords["y"] - center[1]).rename("r").chunk("auto").persist()
-    t = (coords["time"] - coords["time"][0]).dt.total_seconds()
-    phase_speed = coords["lam"] * 1000 / (coords["tau"] * 60)
+    r = xr.ufuncs.hypot(coords["x"] - center[0], coords["y"] - center[1]).rename("r").chunk("auto")
+    t = (coords["time"] - coords["time"][0]).dt.total_seconds().chunk("auto")
+    phase_speed = (coords["lam"] * 1000 / (coords["tau"] * 60)).chunk({"lam": 1, "tau": 1})
     cycle = (r - (phase_speed / 1000) * t - offset) / coords["lam"]
-    tec = xr.ufuncs.cos(2 * np.pi * cycle).chunk("auto").persist()
+    tec = xr.ufuncs.cos(2 * np.pi * cycle)
     
-    noise_factor = xr.ufuncs.sqrt((10 ** (coords["snr"] / (-10))) / 2)
+    noise_factor = xr.ufuncs.sqrt((10 ** (coords["snr"] / (-10))) / 2).chunk(5)
     noise = xr.DataArray(
         da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
         dims=tec.dims,
@@ -89,4 +93,4 @@ def constant_model2(
 
     data = xr.Dataset({"image": noisy_tec, "density": density, "center": center})
     data["image"] = data["image"].rolling(x=3, y=3, center=True, min_periods=1).median()
-    return data.chunk(x=-1, y=-1, lam=1, tau=1, time=-1, snr="auto")
+    return data.chunk(x=-1, y=-1, lam=1, tau=1, time=-1, snr=1)

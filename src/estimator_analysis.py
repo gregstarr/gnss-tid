@@ -43,8 +43,8 @@ def get_groupers(results):
     }
 
 
-def get_results():
-    results = xarray.open_zarr("results2.zarr")
+def get_results(fn):
+    results = xarray.open_zarr(fn)
     results = results.assign_coords(spd=results.lam * 1000 / (results.tau * 60))
     results = results.assign_coords(r=xarray.ufuncs.hypot(results.px, results.py))
     results = results.assign_coords(w=results.r / results.lam)
@@ -232,6 +232,7 @@ def make_archive():
 
 
 def main():
+    RESULTS_FILE = "/disk1/tid/users/starr/results/results3.zarr"
     sns.set_theme("notebook", "whitegrid")
     sns.color_palette("crest", as_cmap=True)
     
@@ -244,7 +245,7 @@ def main():
     })
     with Client(processes=True, n_workers=8, threads_per_worker=1) as client:
         print(client.dashboard_link)
-        results = get_results().compute()
+        results = get_results(RESULTS_FILE).compute()
         print("groupers")
         groupers = get_groupers(results)
 

@@ -30,3 +30,4 @@ if __name__ == "__main__":
 
     plots = gnss_tid.parameter.estimate_parameters_block_debug(data.isel(time=slice(-20, None)), NFFT, BLOCK_SIZE, STEP_SIZE)
     hvplot.show(plots)
+    

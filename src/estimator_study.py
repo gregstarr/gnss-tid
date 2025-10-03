@@ -1,6 +1,12 @@
+import os
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import dask
-from dask.distributed import Client
 import dask.array as da
+from dask.diagnostics import ProgressBar
 import xarray
 import numpy as np
 from zarr.codecs import BloscCodec, BloscCname, BloscShuffle
@@ -16,9 +22,9 @@ def save_data(data_fn):
     print()
     data = gnss_tid.synthetic.constant_model2(
         center=xarray.DataArray([0, 0], dims=["ci"]),
-        snr=da.linspace(-6, 6, 30).persist(),
-        wavelength=da.linspace(150, 400, 6).persist(),
-        tau=da.linspace(10, 50, 6).persist(),
+        snr=da.linspace(-6, 6, 30, chunks=1),
+        wavelength=da.linspace(150, 400, 6, chunks=1),
+        tau=da.linspace(10, 50, 6, chunks=1),
         xlim=(-1500, 1500),
         ylim=(-1500, 1500),
         hres=20,
@@ -26,56 +32,22 @@ def save_data(data_fn):
     
     compressor = BloscCodec(cname=BloscCname.lz4, clevel=5, shuffle=BloscShuffle.shuffle)
     encoding = {var: {"compressors": compressor} for var in data.data_vars}
-    data.to_zarr(data_fn, mode="w", encoding=encoding)
+    with ProgressBar():
+        data.to_zarr(data_fn, mode="w", encoding=encoding)
 
 
-def get_template(data, block_size, step_size):
-    edges = block_size // (2 * step_size)
-    patches = (
-        data.image.isel(time=[0], tau=[0], lam=[0], snr=[0])
-        .rolling(y=block_size, x=block_size, center=True)
-        .construct(x="kx", y="ky", stride=step_size)
-        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
-        .rename({"x": "px", "y": "py"})
-    )
-    s = (
-        patches.sizes["px"],
-        patches.sizes["py"],
-        data.sizes["lam"],
-        data.sizes["tau"],
-        data.sizes["time"],
-        data.sizes["snr"],
-    )
-    coords={
-        "px": patches.px,
-        "py": patches.py,
-        "time": data.time,
-        "lam": data.lam,
-        "tau": data.tau,
-        "snr": data.snr,
-    }
-    temp_arr = xarray.DataArray(
-        da.zeros(s),
-        coords=coords,
-        dims=("px", "py", "lam", "tau", "time", "snr"),
-    )
-    var_names = ["phase_speed", "wavelength", "period", "vx", "vy", "R", "coherence"]
-    temp = xarray.Dataset({name: temp_arr.rename(name) for name in var_names})
+def get_template(data, nfft, block_size, step_size):
+    temp = gnss_tid.parameter.estimate_parameters_block_unopt(data.isel(lam=0, tau=0, snr=0), nfft, block_size, step_size)
+    temp = temp.expand_dims(lam=data.lam, tau=data.tau, snr=data.snr)
     return temp.chunk(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
 
 
 if __name__ == "__main__":
-    dask.config.set({
-        "distributed.worker.memory.spill": 0.85,  # default: 0.7
-        "distributed.worker.memory.target": 0.75,  # default: 0.6
-        "distributed.worker.memory.terminate": 0.98,  # default: 0.95
-    })
-    client = Client(processes=True, n_workers=4, threads_per_worker=1)
-    print(client.dashboard_link)
+    dask.config.set(scheduler="threads", num_workers=6)
     
-    data_fn = "/disk1/tid/users/starr/results/data2.zarr"
-    output_fn = "results2.zarr"
-    save_data(data_fn)
+    data_fn = "/disk1/tid/users/starr/results/data3.zarr"
+    output_fn = "results3.zarr"
+    # save_data(data_fn)
     data = xarray.open_zarr(
         data_fn,
         chunks=dict(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
@@ -90,10 +62,11 @@ if __name__ == "__main__":
     BLOCK_SIZE = 32
     STEP_SIZE = 8
     NFFT = 128
-    template = get_template(data, BLOCK_SIZE, STEP_SIZE)
+    
+    template = get_template(data, NFFT, BLOCK_SIZE, STEP_SIZE)
 
     params = data.map_blocks(
-        gnss_tid.parameter.estimate_parameters_block_v4,
+        gnss_tid.parameter.estimate_parameters_block_unopt,
         kwargs={
             "Nfft": NFFT,
             "block_size": BLOCK_SIZE,
@@ -102,4 +75,5 @@ if __name__ == "__main__":
         template=template,
     )
     print(params)
-    params.to_zarr(output_fn, mode="w")
+    with ProgressBar():
+        params.to_zarr(output_fn, mode="w")

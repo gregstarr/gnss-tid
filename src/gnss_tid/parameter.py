@@ -679,7 +679,7 @@ def estimate_parameters_block_debug(
         layout = pn.GridSpec()
         layout[0, 0] = coherence_plot.opts(title="Coherence [x, y]")
         layout[1, 0] = freq_snr_plot.opts(logy=True, title="Freq SNR [x, y]")
-        layout[2, 0] = freq_plot.opts(title="Freq [x, y]")
+        layout[2, 0] = freq_plot.opts(title="Freq [x, y, kx, ky]")
         
         layout[0, 1:] = tec_plot
         
@@ -712,62 +712,101 @@ def estimate_parameters_block_debug(
     return layout
 
 
+def estimate_parameters_block_unopt(
+        data: xr.Dataset,
+        Nfft=256,
+        block_size=32,
+        step_size=8,
+        smooth_win=9,
+        kaiser_beta=5,
+        normalize=None,
+    ):
+    hres = (data.x[1] - data.x[0]).item()
+    edges = block_size // (2 * step_size)
+    window = kaiser(block_size, kaiser_beta)
+    window = np.outer(window, window) / np.sum(window)
 
-def plotter2(time, x, y, kx, ky):
-    txy = params.isel(time=time, px=x, py=y)
-    kxy = params.isel(px=x, py=y, kx=kx, ky=ky)
-    pxy = params.isel(px=x, py=y)
+    if "density" in data:
+        img = data.image.where(data.density >= 5, 0)
+    else:
+        img = data.image
     
-    tec_plot = pn.pane.HoloViews(
-        hv.Image(img.isel(time=time))
-        .opts(
-            cmap=cc.cm.diverging_bwr_55_98_c37,
-            colorbar=True,
-            clim=(-.3, .3),
-            title="TEC",
-        ) *
-        hv.Points((params.px.values[x], params.py.values[y]), kdims=["x", "y"]).opts(color="k")
+    if normalize == "image":
+        img = (img - img.mean(["x", "y"])) / img.std(["x", "y"])
+        
+    params = xr.Dataset()
+    img_patches = (
+        img
+        .rolling(y=block_size, x=block_size, center=True)
+        .construct(x="kx", y="ky", stride=step_size)
+        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
+        .rename({"x": "px", "y": "py"})
     )
+    if normalize == "patch":
+        img_patches = (img_patches - img_patches.mean(["kx", "ky"])) / img_patches.std(["kx", "ky"])
 
-    patch_plot = pn.pane.HoloViews(
-        hv.Image(txy["img_patches"].data[::-1], kdims=["xp", "yp"])
-        .opts(cmap=cc.cm.diverging_bwr_55_98_c37, clim=(-.3, .3), title="Patch")
-    )
-
-    power_plot = (
-        hv.Image(txy["power"])
-        .opts(cmap=cc.cm.gouldian, colorbar=True, title="Power with threshold levels")
-    )
-    levels = txy["power"].quantile([.8, .95], KDIMS).values
-    power_plot = pn.pane.HoloViews(
-        hv.operation.contours(power_plot, levels=levels, overlaid=True) *
-        hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="r")
-    )
-
-    freq_img_plot = pn.pane.HoloViews(
-        hv.Image(txy["freq_snr"])
-        .opts(cmap=cc.cm.gouldian, colorbar=True, title="Freq SNR") *
-        hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="r")
-    )
-
-    wf_plot = pn.pane.HoloViews(
-        hv.Image(txy["weight"] * txy["freq"])
-        .opts(cmap=cc.cm.diverging_bwr_55_98_c37, colorbar=True, title="Freq * weight") *
-        hv.Points((params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]).opts(color="k")
-    )
-
-    freq_plot = pn.pane.HoloViews(hv.Curve(kxy["freq"]) * hv.VLine(img.time.values[time]))
-    freq_snr_plot = pn.pane.HoloViews(hv.Curve(kxy["freq_snr"]) * hv.Curve(pxy["patch_freq_snr"]) * hv.VLine(img.time.values[time]))
-    coherence_plot = pn.pane.HoloViews(hv.Curve(pxy["coherence"]) * hv.VLine(img.time.values[time]))
-
-    layout = pn.GridSpec(width=1000, height=1000)
-    layout[0, 2] = patch_plot
-    layout[1, 0] = coherence_plot
-    layout[1, 1] = power_plot
-    layout[1, 2] = wf_plot
-    layout[2, 0] = freq_img_plot
-    layout[2, 1] = freq_snr_plot
-    layout[2, 2] = freq_plot
-    layout[0, 0:2] = tec_plot
+    wavenum = fftfreq(Nfft, hres)
     
-    return layout
+    F = (
+        xr.apply_ufunc(
+            lambda x: fft2(x * window, s=(Nfft, Nfft)),
+            img_patches,
+            input_core_dims=[KDIMS],
+            output_core_dims=[KDIMS],
+            output_dtypes=[np.complex128],
+            dask_gufunc_kwargs={"output_sizes": {"kx": Nfft, "ky": Nfft}},
+            dask="parallelized",
+            exclude_dims={"kx", "ky"}
+        )
+        .assign_coords(kx=wavenum, ky=wavenum)
+        .sortby("kx").sortby("ky")
+    ).chunk({"time": -1})
+
+    power = abs(F) ** 2
+
+    # set up weighted average, only keep k bins with power exceeding threshold
+    threshold = power.quantile(.95, KDIMS).drop("quantile")
+    params["power_threshold"] = threshold
+    W = power.where(power > threshold)
+    W = W / W.sum(KDIMS)
+
+    phase = xr.apply_ufunc(
+        np.unwrap,
+        xr.ufuncs.angle(F),
+        input_core_dims=[["time"]],
+        output_core_dims=[["time"]],
+        dask="parallelized",
+    ) / TAU
+
+    freq = phase.differentiate("time", datetime_unit="s")
+    freq_noise_power = freq.rolling(time=smooth_win, center=True, min_periods=1).var()
+    freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
+    freq_snr = (freq**2 / freq_noise_power)
+    params["patch_freq_snr"] = (freq_snr * W).sum(KDIMS)
+    
+    # weighted average phase velocity and phase speed
+    k = W.kx + W.ky * 1j
+    k2 = k ** 2
+    params["phase_velocity"] = (W * k * freq / abs(k)**2).sum(KDIMS)
+    params["phase_velocity_angle"] = xr.ufuncs.angle(params["phase_velocity"])
+    params["phase_speed"] = abs(params["phase_velocity"]) * 1000  # m/s
+
+    params["S0"] = (W * k * k.conj()).sum(KDIMS).real
+    params["S2"] = (W * k2).sum(KDIMS)
+    params["anisotropy_mag"] = abs(params["S2"]) / params["S0"]
+
+    K_rms = xr.ufuncs.sqrt(abs((W * k2).sum(KDIMS)))
+    unit_k2 = k2 / abs(k2)
+    params["coherence"] = abs((W * unit_k2).sum(KDIMS))
+
+    direction = xr.ufuncs.sign((k.conj() * params["phase_velocity"]).real)
+    params["weighted_freq_mean"] = (W * freq * direction).sum(KDIMS)
+    # arbitrarily setting max period to 2x length of data interval
+    max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
+    params["period"] = (1 / (60 * params["weighted_freq_mean"])).where(params["weighted_freq_mean"] > 0)  # minutes
+    params["period"] = params["period"].where(params["period"] <= max_period)
+    params["wavelength"] = params["phase_speed"] * params["period"] * 60 / 1000  # km
+
+    params["alt_phase_speed"] = 1000 * params["weighted_freq_mean"] / K_rms
+    
+    return params
