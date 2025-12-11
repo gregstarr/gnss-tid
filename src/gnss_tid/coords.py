@@ -180,3 +180,4 @@ def aer2ipp(az, el, rxp, H=350):
     lon = np.radians(lon0) + np.arcsin(np.sin(psi) * np.sin(np.radians(az)) / np.cos(lat))
     
     return np.degrees(lat), np.degrees(lon)
+xarray.open_groups

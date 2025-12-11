@@ -783,6 +783,7 @@ def estimate_parameters_block_unopt(
     freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
     freq_snr = (freq**2 / freq_noise_power)
     params["patch_freq_snr"] = (freq_snr * W).sum(KDIMS)
+    params["weighted_freq_mean"] = (W * abs(freq)).sum(KDIMS)
     
     # weighted average phase velocity and phase speed
     k = W.kx + W.ky * 1j
@@ -799,8 +800,6 @@ def estimate_parameters_block_unopt(
     unit_k2 = k2 / abs(k2)
     params["coherence"] = abs((W * unit_k2).sum(KDIMS))
 
-    direction = xr.ufuncs.sign((k.conj() * params["phase_velocity"]).real)
-    params["weighted_freq_mean"] = (W * freq * direction).sum(KDIMS)
     # arbitrarily setting max period to 2x length of data interval
     max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
     params["period"] = (1 / (60 * params["weighted_freq_mean"])).where(params["weighted_freq_mean"] > 0)  # minutes

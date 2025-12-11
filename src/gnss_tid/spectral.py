@@ -10,6 +10,7 @@ from scipy.fft import fft2, fftfreq
 from scipy.signal.windows import kaiser
 from joblib import Parallel, delayed
 from matplotlib import pyplot as plt
+from tqdm_joblib import tqdm_joblib
 
 from .pointdata import PointData
 from .image import ImageMaker
@@ -70,16 +71,24 @@ class BlockSpectralFocusing:
         height = self.heights[len(self.heights)//2]
         logger.info("running initializer")
 
-        @delayed
-        def fn(ts):
-            data = points.get_data(ts, height)
-            if data is None:
-                return 0
-            s = data.x.shape[0]
-            return s
-
-        with Parallel(n_jobs=self.n_jobs) as parallel:
-            sizes = parallel(fn(ts) for ts in slices)
+        if self.n_jobs > 1:
+            @delayed
+            def fn(ts):
+                data = points.get_data(ts, height)
+                if data is None:
+                    return 0
+                s = data.x.shape[0]
+                return s
+            with tqdm_joblib(desc="initializing", total=len(slices)):
+                with Parallel(n_jobs=self.n_jobs) as parallel:
+                    sizes = parallel(fn(ts) for ts in slices)
+        else:
+            sizes = []
+            for ts in slices:
+                data = points.get_data(ts, height)
+                if data is None:
+                    return 0
+                sizes.append(data.x.shape[0])
 
         ii = np.argmax(sizes)
         logger.info("initializer finished, best slice -> %d: %d", ii, sizes[ii])

@@ -33,6 +33,7 @@ dependencies = [
     "statsmodels>=0.14.5",
     "torch>=2.5.1",
     "tqdm>=4.67.0",
+    "tqdm-joblib>=0.0.5",
     "xarray==2025.7.1",
     "zarr>=3.0.7",
 ]

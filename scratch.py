@@ -3,7 +3,7 @@ import shutil
 
 import zarr
 import dask
-from tqdm.contrib.itertools import product
+from tqdm.std import trange
 from tqdm.dask import TqdmCallback
 import dask.array as da
 import numpy as np
@@ -19,11 +19,12 @@ def save_data(data_fn):
     print("DATA")
     print("#" * 80)
     print()
-    data = gnss_tid.synthetic.constant_model2(
-        center=xarray.DataArray([0, 0], dims=["ci"]),
-        snr=da.linspace(-6, 6, 30, chunks=1),
-        wavelength=da.linspace(150, 400, 6, chunks=1),
-        tau=da.linspace(10, 50, 6, chunks=1),
+    shutil.rmtree(data_fn, ignore_errors=True)
+    data = gnss_tid.synthetic.constant_model3(
+        snr_interval=[-6, 6],
+        wavelength_interval=[100, 700],
+        tau_interval=[10, 80],
+        n_trials=1500,
         xlim=(-1500, 1500),
         ylim=(-1500, 1500),
         hres=20,
@@ -31,15 +32,17 @@ def save_data(data_fn):
     
     compressor = BloscCodec(cname=BloscCname.lz4, clevel=5, shuffle=BloscShuffle.shuffle)
     encoding = {var: {"compressors": compressor} for var in data.data_vars}
-    data.to_zarr(data_fn, mode="w", encoding=encoding, consolidated=True)
+    with TqdmCallback():
+        data.to_zarr(data_fn, mode="w", encoding=encoding, consolidated=True)
 
 
 def initialize(estimator, data, output_fn):
     print("INITIALIZING")
     shutil.rmtree(output_fn, ignore_errors=True)
-    params = estimator(data.isel(snr=0, lam=0, tau=0))
-    params = params.expand_dims(lam=data.lam, tau=data.tau, snr=data.snr)
-    params = params.chunk(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
+    params = estimator(data.isel(trial=0))
+    params = params.expand_dims(trial=data.trial)
+    params = params.assign_coords(snr=data.snr, tau=data.tau, lam=data.lam)
+    params = params.chunk(px=-1, py=-1, time=-1, trial=1)
     print(params["S0"])
     print(params["anisotropy_mag"])
     with TqdmCallback():
@@ -55,43 +58,46 @@ def main():
     STEP_SIZE = 8
     NFFT = 128
 
-    estimator = functools.partial(
-        gnss_tid.parameter.estimate_parameters_block_unopt,
-        Nfft=NFFT,
-        block_size=BLOCK_SIZE,
-        step_size=STEP_SIZE,
-        normalize="patch",
-    )
-    
-    data_fn = "/disk1/tid/users/starr/results/data3.zarr"
-    output_fn = "/disk1/tid/users/starr/results/results4.zarr"
-
+    data_fn = "/disk1/tid/users/starr/results/data5.zarr"
+    save_data(data_fn)
     data = xarray.open_zarr(
         data_fn,
-        chunks=dict(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
+        chunks=dict(px=-1, py=-1, time=-1, trial=1)
     )
-    # INITIALIZE
-    initialize(estimator, data, output_fn)
+    
+    for NORM in ["patch", "image"]:
+        estimator = functools.partial(
+            gnss_tid.parameter.estimate_parameters_block_unopt,
+            Nfft=NFFT,
+            block_size=BLOCK_SIZE,
+            step_size=STEP_SIZE,
+            normalize=NORM,
+        )
+        output_fn = f"/disk1/tid/users/starr/results/results5_{NORM}.zarr"
+        initialize(estimator, data, output_fn)
 
-    print("RUNNING TRIALS")
-    for ii, jj, kk in product(range(data.sizes["snr"]), range(data.sizes["lam"]), range(data.sizes["tau"]), desc="TRIALS"):
-        params = estimator(data.isel(snr=ii, lam=jj, tau=kk))
-        params = params.expand_dims(snr=[data.snr[ii].item()], lam=[data.lam[jj].item()], tau=[data.tau[kk].item()])
-        params = params.chunk(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
-        with TqdmCallback(position=1, leave=False):
-            params.to_zarr(
-                output_fn,
-                region={
-                    "snr": slice(ii, ii+1),
-                    "lam": slice(jj, jj+1),
-                    "tau": slice(kk, kk+1),
-                    "px": slice(None),
-                    "py": slice(None),
-                    "time": slice(None),
-                },
-                consolidated=False,
+        print("RUNNING TRIALS")
+        for ii in trange(data.sizes["trial"], desc=f"{NORM} TRIALS"):
+            params = estimator(data.isel(trial=ii))
+            params = params.expand_dims(trial=[data.trial[ii].item()])
+            params = params.assign_coords(
+                snr=("trial", [data.snr[ii].values.item()]),
+                lam=("trial", [data.lam[ii].values.item()]),
+                tau=("trial", [data.tau[ii].values.item()]),
             )
-    zarr.consolidate_metadata(output_fn)
+            params = params.chunk(px=-1, py=-1, time=-1, trial=1)
+            with TqdmCallback(position=1, leave=False):
+                params.to_zarr(
+                    output_fn,
+                    region={
+                        "trial": slice(ii, ii+1),
+                        "px": slice(None),
+                        "py": slice(None),
+                        "time": slice(None),
+                    },
+                    consolidated=False,
+                )
+        zarr.consolidate_metadata(output_fn)
 
 
 if __name__ == "__main__":
