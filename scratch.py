@@ -52,7 +52,7 @@ def initialize(estimator, data, output_fn):
 def main():
     import warnings
     warnings.filterwarnings("ignore", category=RuntimeWarning)
-    dask.config.set(scheduler="threads", num_workers=24)
+    dask.config.set(scheduler="threads", num_workers=8)
 
     BLOCK_SIZE = 32
     STEP_SIZE = 8
