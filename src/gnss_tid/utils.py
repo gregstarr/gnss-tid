@@ -110,5 +110,3 @@ def find_center(pts, vectors, weights):
     b = np.sum(A * pts[mask], axis=1)
     center, *_ = np.linalg.lstsq(A, b)
     return center
-
-

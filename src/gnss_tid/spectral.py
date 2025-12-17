@@ -49,11 +49,12 @@ class BlockSpectralFocusing:
             block_size: int,
             block_step: int,
             kaiser_beta: int,
-            quantile_thresh: float,
             logscale_objective: bool,
             n_jobs: int,
+            tec_name: str,
         ):
         self.n_jobs = n_jobs
+        self.tec_name = tec_name
         self.image_maker = image_maker
         self.center_finder = center_finder
         self.heights = np.arange(height_min, height_max, height_step)
@@ -61,7 +62,6 @@ class BlockSpectralFocusing:
         self.block_step = block_step
         k = kaiser(block_size, kaiser_beta)
         self.window = np.outer(k, k).reshape(1, 1, block_size, block_size)
-        self.quantile_thresh = quantile_thresh
         self.logscale_objective = logscale_objective
         if n_jobs > 1:
             self.run_time = delayed(self.run_time)
@@ -177,7 +177,7 @@ class BlockSpectralFocusing:
         w0 = 1 / k.max()
 
         data = points.get_data(ts, F.height.values)
-        result = self.center_finder(c0, w0, data.x.values, data.y.values, data.tec.values)
+        result = self.center_finder(c0, w0, data.x.values, data.y.values, data[self.tec_name].values)
         return result
         
     def process_heights(self, points, ts, wlog=None):
@@ -193,7 +193,7 @@ class BlockSpectralFocusing:
                 wlog.warning("[%03d-%03d]: FAIL", ts.start, ts.stop)
                 return
             npts.append(data.x.shape[0])
-            img = self.image_maker(data.x.values, data.y.values, data.tec.values)
+            img = self.image_maker(data.x.values, data.y.values, data[self.tec_name].values)
             patches.append(self.get_fft_patches(img.image))
             images.append(img)
         
@@ -290,7 +290,7 @@ class SmoothedPatchSpectral(BlockSpectralFocusing):
             data = points.get_data(ts, height)
             if data is None:
                 continue
-            img = self.image_maker(data.x.values, data.y.values, data.tec.values)
+            img = self.image_maker(data.x.values, data.y.values, data[self.tec_name].values)
             p = self.get_fft_patches(img.image)
             img = img.assign(patch=p).expand_dims(time=[time])
             images.append(img)

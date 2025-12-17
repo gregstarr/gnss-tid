@@ -9,8 +9,8 @@ height_step: 10
 block_size: 32
 block_step: 16
 kaiser_beta: 1
-quantile_thresh: 0
-density_thresh: 20
+density_thresh: 10
 time_window: 15
 logscale_objective: True
-n_jobs: 10
+n_jobs: 24
+tec_name: dtec1
