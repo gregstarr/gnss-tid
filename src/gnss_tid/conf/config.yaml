@@ -12,7 +12,7 @@ sample:
 
 hydra:
   job:
-    chdir: True
+    chdir: true
   job_logging:
     formatters:
       simple:

@@ -10,7 +10,7 @@ dependencies = [
     "cartopy<0.25",
     "colorcet>=3.1.0",
     "contourpy<1.3",
-    "dask>=2025.12.0",
+    "dask[distributed]>=2025.12.0",
     "h5netcdf>=1.7.3",
     "h5py<3.15",
     "holoviews>=1.22.1",
@@ -34,7 +34,8 @@ dependencies = [
 ]
 
 [project.scripts]
-tid = "gnss_tid.main:main"
+autofocus = "gnss_tid.main:main"
+param = "gnss_tid.run_estimator:main"
 
 [build-system]
 requires = ["hatchling"]
