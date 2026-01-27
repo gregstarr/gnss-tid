@@ -1,0 +1,18 @@
+defaults:
+  - client: sagan_exp
+  - _self_
+
+block_size: 32
+step_size: 8
+nfft: 128
+norm: patch
+wave_type: planar
+
+n_trials: 1200
+
+hydra:
+  job_logging:
+    formatters:
+      simple:
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        fmt: "[%(asctime)s][%(name)s][%(levelname)s] %(message)s"

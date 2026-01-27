@@ -1,3 +1,5 @@
+import logging
+
 from numpy.typing import ArrayLike
 import numpy as np
 import dask.array as da
@@ -5,131 +7,64 @@ import xarray as xr
 import pandas
 
 
-def constant_model(
+def spherical_model(
         time: pandas.DatetimeIndex | None = None,
         center: ArrayLike = (100, 100),
-        wavelength: float = 300,
-        phase_speed: float = 200,
-        xlim: ArrayLike = (-1000, 1000),
-        ylim: ArrayLike = (-1000, 1000),
-        hres: float = 20,
-        offset: float = 0,
-        snr: float = 0,
-        ) -> xr.DataArray:
-    """constant center, wavelength and phase speed model
-
-    Args:
-        time (pandas.DatetimeIndex | None, optional): time. Defaults to None.
-        center (ArrayLike, optional): center in km. Defaults to (100, 100).
-        wavelength (float, optional): wavelength in km. Defaults to 300.
-        phase_speed (float, optional): phase speed in m/s. Defaults to 200.
-        xlim (ArrayLike, optional): region x limits in km. Defaults to (-1000, 1000).
-        ylim (ArrayLike, optional): region y limits in km. Defaults to (-1000, 1000).
-        hres (float, optional): horizontal resolution in km. Defaults to 20.
-        offset (float, optional): phase offset in km. Defaults to 0.
-        snr (float, optional): signal to noise ratio in dB. Defaults to 0.
-
-    Returns:
-        xr.DataArray: noisy tec image dataset (with center)
-    """
-    if time is None:
-        time = xr.date_range("2025-01-01 00:00:00", "2025-01-01 02:00:00", freq="60s")
-    time = xr.DataArray(time, dims=["time"], name="time")
-    x = xr.DataArray(np.arange(xlim[0], xlim[1] + hres, hres), dims=["x"], name="x")
-    y = xr.DataArray(np.arange(ylim[0], ylim[1] + hres, hres), dims=["y"], name="y")
-    r = np.hypot(x - center[0], y - center[1]).rename("r").assign_coords(x=x, y=y)
-    t = (time - time[0]).dt.total_seconds()
-    cycle = (r - (phase_speed / 1000) * t - offset) / wavelength
-    tec = np.cos(2 * np.pi * cycle)
-    
-    noise_factor = np.sqrt((10 ** (snr / (-10))) / 2)
-    print(f"{snr = }, {noise_factor = }")
-    noise = np.random.randn(*tec.shape) * noise_factor
-    noisy_tec = tec + noise
-    density = xr.ones_like(tec) * 20
-
-    return xr.Dataset({"image": noisy_tec, "density": density, "center": center})
-
-
-def constant_model2(
-        time: pandas.DatetimeIndex | None = None,
-        center: ArrayLike = (100, 100),
-        snr = da.arange(-3, 2, 1),
-        wavelength = da.arange(150, 201, 50),
-        tau = da.arange(40, 51, 10),
-        xlim: ArrayLike = (-1000, 1000),
-        ylim: ArrayLike = (-1000, 1000),
-        hres: float = 20,
-        offset: float = 0,
-        ) -> xr.DataArray:
-    if time is None:
-        start = np.datetime64("2025-01-01T00:00:00")
-        stop  = np.datetime64("2025-01-01T02:00:00")
-        step  = np.timedelta64(60, "s")   # 60 seconds
-        time = da.arange(start, stop + step, step, dtype="M8[ns]", chunks=1)
-    
-    coords = xr.Coordinates(dict(
-        snr=snr,
-        lam=wavelength,
-        tau=tau,
-        time=time,
-        x=da.arange(xlim[0], xlim[1] + hres, hres, chunks=-1),
-        y=da.arange(ylim[0], ylim[1] + hres, hres, chunks=-1),
-    ))
-    r = xr.ufuncs.hypot(coords["x"] - center[0], coords["y"] - center[1]).rename("r").chunk("auto")
-    t = (coords["time"] - coords["time"][0]).dt.total_seconds().chunk("auto")
-    phase_speed = (coords["lam"] * 1000 / (coords["tau"] * 60)).chunk({"lam": 1, "tau": 1})
-    cycle = (r - (phase_speed / 1000) * t - offset) / coords["lam"]
-    tec = xr.ufuncs.cos(2 * np.pi * cycle)
-    
-    noise_factor = xr.ufuncs.sqrt((10 ** (coords["snr"] / (-10))) / 2).chunk(5)
-    noise = xr.DataArray(
-        da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
-        dims=tec.dims,
-        coords=tec.coords,
-    ) * noise_factor
-    noisy_tec = tec + noise
-    density = xr.ones_like(noisy_tec, chunks=noisy_tec.chunks) * 20
-
-    data = xr.Dataset({"image": noisy_tec, "density": density, "center": center})
-    data["image"] = data["image"].rolling(x=3, y=3, center=True, min_periods=1).median()
-    return data.chunk(x=-1, y=-1, lam=1, tau=1, time=-1, snr=1)
-
-
-def constant_model3(
-        time: pandas.DatetimeIndex | None = None,
-        center: ArrayLike = (100, 100),
-        snr_interval = [-6, 6],
-        wavelength_interval = [150, 400],
-        tau_interval = [10, 50],
+        snr_lim = [-6, 6],
+        lam_lim = [150, 400],
+        tau_lim = [10, 50],
         n_trials = 10,
         xlim: ArrayLike = (-1000, 1000),
         ylim: ArrayLike = (-1000, 1000),
         hres: float = 20,
-        offset: float = 0,
-        ) -> xr.DataArray:
+        batch_size: int = 20,
+    ) -> xr.DataArray:
     if time is None:
-        start = np.datetime64("2025-01-01T00:00:00")
-        stop  = np.datetime64("2025-01-01T01:00:00")
-        step  = np.timedelta64(60, "s")   # 60 seconds
-        time = da.arange(start, stop + step, step, dtype="M8[ns]", chunks=1)
-    coords = xr.Coordinates(dict(
-        trial=da.arange(0, n_trials, chunks=1),
-        time=time,
-        x=da.arange(xlim[0], xlim[1] + hres, hres, chunks=-1),
-        y=da.arange(ylim[0], ylim[1] + hres, hres, chunks=-1),
-    ))
-    snr = np.random.random(n_trials) * (snr_interval[1] - snr_interval[0]) + snr_interval[0]
-    wavelength = np.random.random(n_trials) * (wavelength_interval[1] - wavelength_interval[0]) + wavelength_interval[0]
-    tau = np.random.random(n_trials) * (tau_interval[1] - tau_interval[0]) + tau_interval[0]
-    coords = coords.assign(snr=("trial", snr), lam=("trial", wavelength), tau=("trial", tau))
+        time = pandas.date_range("2025-01-01", "2025-01-01T01:00:00", freq="60s")
+    
+    # don't chunk trial=1 for "generation + write" workflows with many trials. trial=1 
+    # creates thousands of tiny blocks, which inflates the task graph and slows scheduling.
+    # Use a reasonable batch size (e.g., 20–100) to keep graph size and overhead down.
+    batch_size = min(batch_size, n_trials)
+    
+    trials = np.arange(0, n_trials)
+    
+    # keep per-trial parameters as simple NumPy (then chunk once). Using 
+    # da.random(..., chunks=1) for these made the graph larger because it adds RNG tasks
+    # (and chunks=1 adds one chunk per trial). These arrays are small, so NumPy is fine.
+    snr = xr.DataArray(
+        np.random.rand(n_trials) * (snr_lim[1] - snr_lim[0]) + snr_lim[0],
+        coords=[("trial", trials)],
+    ).chunk(trial=batch_size)
+    lam = xr.DataArray(
+        np.random.rand(n_trials) * (lam_lim[1] - lam_lim[0]) + lam_lim[0],
+        coords=[("trial", trials)],
+    ).chunk(trial=batch_size)
+    tau = xr.DataArray(
+        np.random.rand(n_trials) * (tau_lim[1] - tau_lim[0]) + tau_lim[0],
+        coords=[("trial", trials)],
+    ).chunk(trial=batch_size)
 
-    r = xr.ufuncs.hypot(coords["x"] - center[0], coords["y"] - center[1]).rename("r").chunk("auto")
-    t = (coords["time"] - coords["time"][0]).dt.total_seconds().chunk("auto")
-    phase_speed = (coords["lam"] * 1000 / (coords["tau"] * 60)).chunk(1)
-    cycle = (r - (phase_speed / 1000) * t - offset) / coords["lam"]
-    tec = xr.ufuncs.cos(2 * np.pi * cycle)
-    noise_factor = xr.ufuncs.sqrt((10 ** (coords["snr"] / (-10))) / 2)
+    # Important: x/y/t are "broadcast drivers" for the big (trial,time,x,y) arrays.
+    # Even if they're small 1-D vectors, making them dask-backed prevents eager broadcast
+    # intermediates (like r) and avoids repeatedly embedding NumPy constants into many tasks,
+    # which can bloat the serialized graph sent to the scheduler.
+    xlab = np.arange(xlim[0], xlim[1] + hres, hres)
+    ylab = np.arange(ylim[0], ylim[1] + hres, hres)
+    x = xr.DataArray(da.from_array(xlab, chunks=-1), coords=[("x", xlab)])
+    y = xr.DataArray(da.from_array(ylab, chunks=-1), coords=[("y", ylab)])
+    r = da.hypot(x - center[0], y - center[1]).rename("r")
+    # We keep t numeric (seconds) instead of leaning on heavy datetime ops in the graph.
+    # (Datetime arithmetic/total_seconds can create extra graph overhead.)
+    t = xr.DataArray(
+        da.from_array((time - time[0]).total_seconds().values, chunks=-1),
+        coords=[("time", time)],
+    )
+
+    phase_speed = lam * 1000 / (tau * 60)
+    cycle = (r - (phase_speed / 1000) * t) / lam
+    tec = da.cos(2 * np.pi * cycle)
+    noise_factor = da.sqrt((10 ** (snr / (-10))) / 2)
     noise = xr.DataArray(
         da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
         dims=tec.dims,
@@ -138,8 +73,91 @@ def constant_model3(
     noisy_tec = tec + noise
     density = xr.ones_like(noisy_tec, chunks=noisy_tec.chunks) * 20
 
-    data = xr.Dataset({"image": noisy_tec, "density": density})
-    data = data.assign_attrs(center=center)
-    data["image"] = data["image"].rolling(x=3, y=3, center=True, min_periods=1).median()
+    # Rolling median was the big offender for graph/task explosion; rolling mean is much
+    # friendlier (decomposable reduction, much more fuseable in dask). rechunk after the
+    # rolling op because otherwise xarray or dask changes the chunk layout
+    noisy_tec = (
+        noisy_tec
+        .rolling(x=3, y=3, center=True, min_periods=1)
+        .mean()
+        .chunk(x=-1, y=-1, time=-1, trial=batch_size)
+    )
+    data = (
+        xr.Dataset({"image": noisy_tec, "density": density})
+        .assign_attrs(center=center)
+        .assign_coords(snr=snr, lam=lam, tau=tau)
+    )
 
-    return data.chunk(x=-1, y=-1, time=-1, trial=1)
+    return data
+
+
+def planar_model(
+        time: pandas.DatetimeIndex | None = None,
+        snr_lim = [-6, 6],
+        lam_lim = [150, 400],
+        tau_lim = [10, 50],
+        n_trials = 10,
+        xlim: ArrayLike = (-1000, 1000),
+        ylim: ArrayLike = (-1000, 1000),
+        hres: float = 20,
+        batch_size: int = 20,
+    ) -> xr.DataArray:
+    if time is None:
+        time = pandas.date_range("2025-01-01", "2025-01-01T01:00:00", freq="60s")
+    
+    batch_size = min(batch_size, n_trials)
+    
+    trials = np.arange(0, n_trials)
+    
+    snr = xr.DataArray(
+        np.random.rand(n_trials) * (snr_lim[1] - snr_lim[0]) + snr_lim[0],
+        coords=[("trial", trials)],
+    ).chunk(trial=batch_size)
+    lam = xr.DataArray(
+        np.random.rand(n_trials) * (lam_lim[1] - lam_lim[0]) + lam_lim[0],
+        coords=[("trial", trials)],
+    ).chunk(trial=batch_size)
+    tau = xr.DataArray(
+        np.random.rand(n_trials) * (tau_lim[1] - tau_lim[0]) + tau_lim[0],
+        coords=[("trial", trials)],
+    ).chunk(trial=batch_size)
+    direction = xr.DataArray(
+        np.random.random(n_trials) * 2 * np.pi,
+        coords=[("trial", trials)],
+    ).chunk(trial=batch_size)
+
+    xlab = np.arange(xlim[0], xlim[1] + hres, hres)
+    ylab = np.arange(ylim[0], ylim[1] + hres, hres)
+    x = xr.DataArray(da.from_array(xlab, chunks=-1), coords=[("x", xlab)])
+    y = xr.DataArray(da.from_array(ylab, chunks=-1), coords=[("y", ylab)])
+    t = xr.DataArray(
+        da.from_array((time - time[0]).total_seconds().values, chunks=-1),
+        coords=[("time", time)],
+    )
+
+    k = da.exp(1j * direction) * 2 * np.pi / lam
+    r = x + 1j * y
+    w = 2 * np.pi / (tau * 60)
+    arg = (k.conj() * r).real - w * t
+    tec = da.cos(arg)
+    noise_factor = da.sqrt((10 ** (snr / (-10))) / 2)
+    noise = xr.DataArray(
+        da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
+        dims=tec.dims,
+        coords=tec.coords,
+    ) * noise_factor
+    noisy_tec = tec + noise
+    density = xr.ones_like(noisy_tec, chunks=noisy_tec.chunks) * 20
+
+    noisy_tec = (
+        noisy_tec
+        .rolling(x=3, y=3, center=True, min_periods=1)
+        .mean()
+        .chunk(x=-1, y=-1, time=-1, trial=batch_size)
+    )
+    data = (
+        xr.Dataset({"image": noisy_tec, "density": density})
+        .assign_coords(snr=snr, lam=lam, tau=tau, dir=direction)
+    )
+
+    return data
