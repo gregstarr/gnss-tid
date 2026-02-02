@@ -4,4 +4,4 @@ hp_freq: .02
 neighbor_radius: 100.0
 neighbors: 50
 kernel: multiquadric
-smoothing: .2
+smoothing: .3

@@ -86,7 +86,7 @@ class ScipyRbfImageMaker:
                 boundary_coords["east"] - boundary_coords["west"],
                 boundary_coords["north"] - boundary_coords["south"]
             ])
-            self.kwargs["epsilon"] = np.power(np.prod(edges)/len(x), .5)
+            self.kwargs["epsilon"] = 1 / np.power(np.prod(edges)/len(x), .5)
             logger.info("computed epsilon: %.2f", self.kwargs["epsilon"])
     
     def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray:

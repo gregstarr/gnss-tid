@@ -118,7 +118,7 @@ class PointData:
         data = (
             self._data.isel(n=time_mask)
             .drop_vars(["sv", "time", "rx"])
-            .groupby("los_id").median()
+            .groupby("los_id").mean()
             .assign_attrs(time=self.times[time_slice.start], height=h)
         )
         z = abs(data[["dtec0", "dtec1", "dtec3", "dtecp"]])
