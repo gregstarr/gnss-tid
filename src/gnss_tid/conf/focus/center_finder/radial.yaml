@@ -1,0 +1,5 @@
+_target_: gnss_tid.radial.CenterFinder
+max_iter: 1500
+learning_rate: 1.0
+improvement: 1.0e-05
+steps: 50

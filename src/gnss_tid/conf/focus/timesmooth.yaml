@@ -1,0 +1,16 @@
+defaults:
+  - image_maker: rbf
+  - center_finder: stationary
+
+_target_: gnss_tid.spectral.SmoothedPatchSpectral
+height_min: 150
+height_max: 400
+height_step: 10
+block_size: 32
+block_step: 16
+kaiser_beta: 1
+density_thresh: 10
+time_window: 15
+logscale_objective: True
+n_jobs: 24
+tec_name: dtec1

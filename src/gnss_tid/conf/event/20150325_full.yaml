@@ -1,0 +1,17 @@
+pointdata:
+  _target_: gnss_tid.pointdata.PointData
+  files:
+    - /disk1/tid/sharon/poly/2015/0325/*.nc
+  latitude_limits:
+    - 24.0
+    - 51.0
+  longitude_limits:
+    - -126.0
+    - -70.0
+  time_limits:
+    - "20150325_223000"
+    - "20150326_011500"
+  el_min: 30
+  q_thresh: .998
+  noise_max: 100
+  n_jobs: 20

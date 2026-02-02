@@ -1,0 +1,22 @@
+defaults:
+  - client: sagan
+  - _self_
+
+folder: ???
+
+block_size: 32
+step_size: 8
+nfft: 128
+norm: patch
+
+hydra:
+  run:
+    dir: ${folder}
+  output_subdir: .param_hydra
+  job:
+    chdir: true
+  job_logging:
+    formatters:
+      simple:
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        fmt: "[%(asctime)s][%(name)s][%(levelname)s] %(message)s"
