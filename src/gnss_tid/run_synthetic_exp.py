@@ -111,6 +111,8 @@ def main(cfg):
 
     client.close()
 
+    logging.info("FINISHED")
+
 
 if __name__ == "__main__":
     main()

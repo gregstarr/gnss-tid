@@ -84,7 +84,36 @@ class PointData:
     def get_coord_center(self):
         return np.mean(self.latitude_limits), np.mean(self.longitude_limits)
     
-    def get_data(self, time_slice: slice, h: float) -> xarray.Dataset | None:
+    def get_data(self, time_slice: slice, h: float, use_local_cs: bool = True) -> xarray.Dataset | None:
+        """gets TEC data of time window at IPP height=h
+
+        Args:
+            time_slice (slice): slice object over time slices, see 
+                `PointData.get_time_slices`
+            h (float): IPP height km
+            use_local_cs (bool, optional): convert to local 2D coordinates. Defaults to True.
+
+        Returns:
+            xarray.Dataset
+            Dimensions: (los_id, )
+            Data variables:
+                az:         float64
+                el:         float64
+                dtec0:      float64
+                dtec1:      float64
+                dtec2:      float64
+                dtec3:      float64
+                dtecp:      float64
+                tec_noise:  float64
+                tec_snr:    float64
+                rx:         int64
+                sv:         object
+                lat:        float32
+                lon:        float32
+                [[if use_local_cs]]
+                x:          float32
+                y:          float32
+        """
         time_mask = np.in1d(self._data.time, self.times[time_slice])
         data = (
             self._data.isel(n=time_mask)
@@ -117,9 +146,11 @@ class PointData:
         if data.lat.size == 0:
             logger.warning("empty lat data: %s", time_slice)
             return None
-        local_coords = Local2D.from_geodetic(*self.get_coord_center(), h)
-        x, y = local_coords.convert_from_spherical(data.lat.values, data.lon.values)
-        data = data.assign_coords(x=("los_id", x), y=("los_id", y))
+        
+        if use_local_cs:
+            local_coords = Local2D.from_geodetic(*self.get_coord_center(), h)
+            x, y = local_coords.convert_from_spherical(data.lat.values, data.lon.values)
+            data = data.assign_coords(x=("los_id", x), y=("los_id", y))
         return data
 
 

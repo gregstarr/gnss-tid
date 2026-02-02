@@ -43,12 +43,13 @@ def get_groupers(results):
     }
 
 
-def get_results(fn, center=(0, 0)):
+def get_results(fn, center=None):
     results = xarray.open_zarr(fn)
     results = results.assign_coords(spd=results.lam * 1000 / (results.tau * 60))
-    results = results.assign_coords(r=xarray.ufuncs.hypot(results.px-center[0], results.py-center[1]))
-    results = results.assign_coords(w=results.r / results.lam)
-    results = results.assign_coords(logw=xarray.ufuncs.log10(results.w))
+    if center is not None:
+        results = results.assign_coords(r=xarray.ufuncs.hypot(results.px-center[0], results.py-center[1]))
+        results = results.assign_coords(w=results.r / results.lam)
+        results = results.assign_coords(logw=xarray.ufuncs.log10(results.w))
     results = results.assign(
         period_error=results.period-results.tau,
         wavelength_error=results.wavelength-results.lam,
