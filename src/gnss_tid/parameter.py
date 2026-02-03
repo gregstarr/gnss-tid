@@ -297,12 +297,13 @@ def estimate_parameters_block_debug(
 
 def estimate_parameters_block_unopt(
         data: xr.Dataset,
-        Nfft=256,
-        block_size=32,
-        step_size=8,
-        smooth_win=9,
-        kaiser_beta=5,
-        normalize=None,
+        Nfft: int = 256,
+        block_size: int = 32,
+        step_size: int = 8,
+        smooth_win: int = 9,
+        kaiser_beta: float = 5,
+        normalize: str | None = None,
+        q_threshold: float = .95
     ):
     hres = (data.x[1] - data.x[0]).item()
     edges = block_size // (2 * step_size)
@@ -326,7 +327,10 @@ def estimate_parameters_block_unopt(
         .rename({"x": "px", "y": "py"})
     )
     if normalize == "patch":
-        img_patches = (img_patches - img_patches.mean(["kx", "ky"])) / img_patches.std(["kx", "ky"])
+        img_patches = (
+            (img_patches - img_patches.mean(["kx", "ky"]))
+            / img_patches.std(["kx", "ky"])
+        )
 
     wavenum = fftfreq(Nfft, hres)
     
@@ -348,7 +352,7 @@ def estimate_parameters_block_unopt(
     power = abs(F) ** 2
 
     # set up weighted average, only keep k bins with power exceeding threshold
-    threshold = power.quantile(.95, KDIMS).drop("quantile")
+    threshold = power.quantile(q_threshold, KDIMS).drop_vars("quantile")
     params["power_threshold"] = threshold
     W = power.where(power > threshold)
     W = W / W.sum(KDIMS)
@@ -366,29 +370,46 @@ def estimate_parameters_block_unopt(
     freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
     freq_snr = (freq**2 / freq_noise_power)
     params["patch_freq_snr"] = (freq_snr * W).sum(KDIMS)
-    params["weighted_freq_mean"] = (W * abs(freq)).sum(KDIMS)
     
-    # weighted average phase velocity and phase speed
     k = W.kx + W.ky * 1j
     k2 = k ** 2
-    params["phase_velocity"] = (W * k * freq / abs(k)**2).sum(KDIMS)
-    params["phase_velocity_angle"] = xr.ufuncs.angle(params["phase_velocity"])
-    params["phase_speed"] = abs(params["phase_velocity"]) * 1000  # m/s
-
     params["S0"] = (W * k * k.conj()).sum(KDIMS).real
     params["S2"] = (W * k2).sum(KDIMS)
     params["anisotropy_mag"] = abs(params["S2"]) / params["S0"]
+    direction = np.exp(1j * xr.ufuncs.angle(params["S2"]) / 2)
 
-    K_rms = xr.ufuncs.sqrt(abs((W * k2).sum(KDIMS)))
+    # positive / negative projection from phase velocity
+    m = np.sign((direction * k.conj()).real)
+    params["wmean_freq"] = (W * freq * m).sum(KDIMS)
+    params["wmean_wavevector"] = (W * k * m).sum(KDIMS)
+
+    kres = wavenum[1] - wavenum[0]
+    params["group_velocity"] = 1000 * (
+        (
+            freq.sel(kx=params["wmean_wavevector"].real+kres, ky=params["wmean_wavevector"].imag, method="nearest") - 
+            freq.sel(kx=params["wmean_wavevector"].real-kres, ky=params["wmean_wavevector"].imag, method="nearest")
+        ) + 
+        1j * (
+            freq.sel(kx=params["wmean_wavevector"].real, ky=params["wmean_wavevector"].imag+kres, method="nearest") - 
+            freq.sel(kx=params["wmean_wavevector"].real, ky=params["wmean_wavevector"].imag-kres, method="nearest")
+        )
+    ) / (2 * kres)  # m/s
+
+    # weighted average phase velocity and phase speed
+    params["phase_velocity"] = 1000 * params["wmean_freq"] / params["wmean_wavevector"]
+    params["phase_velocity_angle"] = xr.ufuncs.angle(params["phase_velocity"])
+    params["phase_speed"] = abs(params["phase_velocity"])  # m/s
+
     unit_k2 = k2 / abs(k2)
     params["coherence"] = abs((W * unit_k2).sum(KDIMS))
 
     # arbitrarily setting max period to 2x length of data interval
     max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
-    params["period"] = (1 / (60 * params["weighted_freq_mean"])).where(params["weighted_freq_mean"] > 0)  # minutes
+    params["period"] = (
+        (1 / (60 * params["wmean_freq"]))
+        .where(params["wmean_freq"] > 0)
+    )  # minutes
     params["period"] = params["period"].where(params["period"] <= max_period)
-    params["wavelength"] = params["phase_speed"] * params["period"] * 60 / 1000  # km
-
-    params["alt_phase_speed"] = 1000 * params["weighted_freq_mean"] / K_rms
+    params["wavelength"] = 1 / abs(params["wmean_wavevector"])  # km
     
     return params
