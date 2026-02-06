@@ -30,7 +30,7 @@ dependencies = [
     "torch<2.7",
     "tqdm-joblib>=0.0.5",
     "xarray>=2025.12.0",
-    "zarr>=3.1.5",
+    "zarr<3",
 ]
 
 [project.scripts]

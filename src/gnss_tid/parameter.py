@@ -3,9 +3,8 @@ import time
 import dask
 import numpy as np
 import xarray as xr
-from scipy.fft import fft, fft2, fftfreq
+from scipy.fft import fft2, fftfreq, fftshift
 from scipy.signal.windows import kaiser
-from scipy.interpolate import make_splrep, make_smoothing_spline
 
 import holoviews as hv
 from holoviews import opts
@@ -303,7 +302,7 @@ def estimate_parameters_block_unopt(
         smooth_win: int = 9,
         kaiser_beta: float = 5,
         normalize: str | None = None,
-        q_threshold: float = .95
+        q_threshold: float = .98
     ):
     hres = (data.x[1] - data.x[0]).item()
     edges = block_size // (2 * step_size)
@@ -366,21 +365,23 @@ def estimate_parameters_block_unopt(
     ) / TAU
 
     freq = phase.differentiate("time", datetime_unit="s")
-    freq_noise_power = freq.rolling(time=smooth_win, center=True, min_periods=1).var()
     freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
-    freq_snr = (freq**2 / freq_noise_power)
-    params["patch_freq_snr"] = (freq_snr * W).sum(KDIMS)
+    params["freq_snr"] = 1 / (
+        freq.rolling(time=smooth_win, center=True, min_periods=1).std() * W
+    ).sum(KDIMS)
     
     k = W.kx + W.ky * 1j
     k2 = k ** 2
-    params["S0"] = (W * k * k.conj()).sum(KDIMS).real
-    params["S2"] = (W * k2).sum(KDIMS)
-    params["anisotropy_mag"] = abs(params["S2"]) / params["S0"]
-    direction = np.exp(1j * xr.ufuncs.angle(params["S2"]) / 2)
+    S0 = (W * k * k.conj()).sum(KDIMS).real
+    S2 = (W * k2).sum(KDIMS)
+    params["e1"] = (S0 + abs(S2)) / 2
+    params["e2"] = (S0 - abs(S2)) / 2
+    params["wavelength_snr"] = 1 / np.sqrt(params["e2"])
+    direction = np.exp(1j * xr.ufuncs.angle(S2) / 2)
 
     # positive / negative projection from phase velocity
     m = np.sign((direction * k.conj()).real)
-    params["wmean_freq"] = (W * freq * m).sum(KDIMS)
+    params["wmean_freq"] = abs((W * freq * m).sum(KDIMS))
     params["wmean_wavevector"] = (W * k * m).sum(KDIMS)
 
     kres = wavenum[1] - wavenum[0]
@@ -400,9 +401,6 @@ def estimate_parameters_block_unopt(
     params["phase_velocity_angle"] = xr.ufuncs.angle(params["phase_velocity"])
     params["phase_speed"] = abs(params["phase_velocity"])  # m/s
 
-    unit_k2 = k2 / abs(k2)
-    params["coherence"] = abs((W * unit_k2).sum(KDIMS))
-
     # arbitrarily setting max period to 2x length of data interval
     max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
     params["period"] = (
@@ -413,3 +411,124 @@ def estimate_parameters_block_unopt(
     params["wavelength"] = 1 / abs(params["wmean_wavevector"])  # km
     
     return params
+
+
+def estimate_parameters_block(
+        data: xr.Dataset,
+        hres: float,
+        Nfft: int = 256,
+        block_size: int = 32,
+        step_size: int = 8,
+        smooth_win: int = 9,
+        kaiser_beta: float = 5,
+        normalize: str | None = None,
+        q_threshold: float = .98
+    ):
+    wavenum = fftshift(fftfreq(Nfft, hres)).astype("float32")
+    kres = (wavenum[1] - wavenum[0])
+    dt = (data.time[1] - data.time[0]).dt.total_seconds().astype("float32")
+
+    if "density" in data:
+        img = data.image.where(data.density >= 5, 0)
+    else:
+        img = data.image
+    img = img.astype("float32")
+    
+    if normalize == "image":
+        img = (img - img.mean(["x", "y"])) / img.std(["x", "y"])
+
+    edges = block_size // (2 * step_size)
+    window = kaiser(block_size, kaiser_beta).astype("float32")
+    window = np.outer(window, window) / np.sum(window)
+    img_patches = (
+        img
+        .rolling(y=block_size, x=block_size, center=True)
+        .construct(x="kx", y="ky", stride=step_size)
+        .isel(x=slice(edges, -edges), y=slice(edges, -edges))
+        .rename({"x": "px", "y": "py"})
+    )
+    if normalize == "patch":
+        img_patches = (
+            (img_patches - img_patches.mean(["kx", "ky"]))
+            / img_patches.std(["kx", "ky"])
+        )
+    
+    F = (
+        xr.apply_ufunc(
+            lambda x: fftshift(fft2(x * window, s=(Nfft, Nfft))),
+            img_patches,
+            input_core_dims=[KDIMS],
+            output_core_dims=[KDIMS],
+            output_dtypes=[np.complex64],
+            dask_gufunc_kwargs={
+                "output_sizes": {"kx": Nfft, "ky": Nfft},
+                "allow_rechunk": False,
+            },
+            dask="parallelized",
+            exclude_dims={"kx", "ky"}
+        )
+        .assign_coords(kx=wavenum, ky=wavenum)
+    )
+    del img_patches
+    power = abs(F) ** 2
+    # forward difference frequency estimate
+    freq = xr.ufuncs.angle(
+        F.isel(time=slice(1, None)) * F.isel(time=slice(None, -1)).conj()
+    ) / (TAU * dt)
+    del F
+
+    # set up weighted average, only keep k bins with power exceeding threshold
+    power_threshold = power.quantile(q_threshold, KDIMS).drop_vars("quantile")
+    W = power.where(power > power_threshold)
+    W = W / W.sum(KDIMS)
+
+    freq = freq.reindex(time=data.time)
+    freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
+    freq_snr = freq.rolling(time=smooth_win, center=True, min_periods=1).std()
+    freq_snr = 1 / ((freq_snr * W).sum(KDIMS))
+    
+    k = W.kx + W.ky * 1j
+    k2 = k ** 2
+    S0 = (W * k * k.conj()).sum(KDIMS).real
+    S2 = (W * k2).sum(KDIMS)
+    e2 = (S0 - abs(S2)) / 2
+    wavelength_snr = 1 / np.sqrt(e2)
+    direction = np.exp(1j * xr.ufuncs.angle(S2) / 2)
+
+    # positive / negative projection from phase velocity
+    m = np.sign((direction * k.conj()).real)
+    wmean_freq = abs((W * freq * m).sum(KDIMS))
+    wmean_wavevector = (W * k * m).sum(KDIMS)
+
+    group_velocity = 1000 * (
+        (
+            freq.sel(kx=wmean_wavevector.real+kres, ky=wmean_wavevector.imag, method="nearest") - 
+            freq.sel(kx=wmean_wavevector.real-kres, ky=wmean_wavevector.imag, method="nearest")
+        ) + 
+        1j * (
+            freq.sel(kx=wmean_wavevector.real, ky=wmean_wavevector.imag+kres, method="nearest") - 
+            freq.sel(kx=wmean_wavevector.real, ky=wmean_wavevector.imag-kres, method="nearest")
+        )
+    ) / (2 * kres)  # m/s
+
+    phase_velocity = 1000 * wmean_freq / wmean_wavevector  # m/s
+
+    # arbitrarily setting max period to 2x length of data interval
+    max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
+    period = 1 / (60 * wmean_freq)  # minutes
+    period = period.where(
+        (wmean_freq > 0) & (period <= max_period)
+    )
+    wavelength = 1 / abs(wmean_wavevector)  # km
+    
+    return xr.Dataset({
+        "period": period,
+        "wavelength": wavelength,
+        "phase_velocity": phase_velocity,
+        "group_velocity": group_velocity,
+        "freq_snr": freq_snr,
+        "wavelength_snr": wavelength_snr,
+        "power_threshold": power_threshold,
+        "S0": S0,
+        "S2": S2,
+    })
