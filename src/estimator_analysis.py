@@ -50,6 +50,8 @@ def get_results(fn, center=None):
         results = results.assign_coords(r=xarray.ufuncs.hypot(results.px-center[0], results.py-center[1]))
         results = results.assign_coords(w=results.r / results.lam)
         results = results.assign_coords(logw=xarray.ufuncs.log10(results.w))
+    if "phase_speed" not in results:
+        results["phase_speed"] = abs(results.phase_velocity)
     results = results.assign(
         period_error=results.period-results.tau,
         wavelength_error=results.wavelength-results.lam,

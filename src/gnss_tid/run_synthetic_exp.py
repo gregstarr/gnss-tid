@@ -41,21 +41,6 @@ def save_data(data_fn, wave_type, n_trials):
     data.to_zarr(data_fn, mode="w", encoding=encoding, consolidated=True)
 
 
-def initialize(estimator, data: xarray.Dataset, wave_type: str):
-    logging.info("INITIALIZING")
-    params: xarray.Dataset = estimator(data.isel(trial=0))
-    params = params.expand_dims(trial=data.trial)
-    params = params.assign_coords(
-        snr=("trial", data.snr.values),
-        tau=("trial", data.tau.values),
-        lam=("trial", data.lam.values),
-    )
-    if wave_type == "planar":
-        params = params.assign_coords(dir=("trial", data.dir.values))
-    params = params.chunk(px=-1, py=-1, time=-1, trial=1)
-    return params
-
-
 @hydra.main(config_path="conf", config_name="exp_config", version_base=None)
 def main(cfg):
     try:
@@ -75,7 +60,7 @@ def main(cfg):
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         data_fn = f"/disk1/tid/users/starr/results/{stamp}_data_{cfg.wave_type}.zarr"
         save_data(data_fn, cfg.wave_type, cfg.n_trials)
-        data = xarray.open_zarr(data_fn).chunk(trial=1)
+        data = xarray.open_zarr(data_fn).chunk(trial=1, time=-1, x=-1, y=-1)
         hres = float(data.x.isel(x=1).values - data.x.isel(x=0).values)
         print(hres)
         
@@ -90,31 +75,40 @@ def main(cfg):
 
         def func(block):
             params = estimator(block)
-            params = params.assign_coords(
-                snr=block.coords["snr"],
-                lam=block.coords["lam"],
-                tau=block.coords["tau"],
-            )
-            if cfg.wave_type == "planar":
-                params = params.assign_coords(dir=block.coords["dir"])
             return params
             
         output_fn = f"/disk1/tid/users/starr/results/{stamp}_results_{cfg.wave_type}.zarr"
-        template = initialize(estimator, data, cfg.wave_type)
+        
+        logging.info("INITIALIZING")
+        # template must have full output size
+        template = (
+            func(data.isel(trial=0))
+            .expand_dims(trial=data.trial)
+            .assign_coords(
+                snr=("trial", data.snr.values),
+                tau=("trial", data.tau.values),
+                lam=("trial", data.lam.values),
+            )
+            .chunk(px=-1, py=-1, time=-1, trial=1)
+        )
 
         logging.info("RUNNING TRIALS")
         store = zarr.DirectoryStore(output_fn)
         params = data.map_blocks(func, template=template)
+        
+        print("PARAMS")
         print(params)
         params.to_zarr(store, mode="w")
 
         client.close()
 
         logging.info("FINISHED")
-    except:
+        logging.info("OUTPUT: %s", output_fn)
+    except Exception as e:
         logging.info("CLEANUP")
         shutil.rmtree(data_fn, ignore_errors=True)
         shutil.rmtree(output_fn, ignore_errors=True)
+        raise e
 
 
 

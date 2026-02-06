@@ -1,6 +1,7 @@
 import time
 
 import dask
+import dask.array
 import numpy as np
 import xarray as xr
 from scipy.fft import fft2, fftfreq, fftshift
@@ -472,9 +473,13 @@ def estimate_parameters_block(
     del img_patches
     power = abs(F) ** 2
     # forward difference frequency estimate
-    freq = xr.ufuncs.angle(
-        F.isel(time=slice(1, None)) * F.isel(time=slice(None, -1)).conj()
-    ) / (TAU * dt)
+    freq = F.isel(time=slice(1, None))
+    freq = xr.DataArray(
+        np.angle(
+            freq.data * F.isel(time=slice(None, -1)).data.conj()
+        ) / (TAU * dt.data),
+        coords=freq.coords,
+    )
     del F
 
     # set up weighted average, only keep k bins with power exceeding threshold
@@ -483,8 +488,8 @@ def estimate_parameters_block(
     W = W / W.sum(KDIMS)
 
     freq = freq.reindex(time=data.time)
-    freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
     freq_snr = freq.rolling(time=smooth_win, center=True, min_periods=1).std()
+    freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
     freq_snr = 1 / ((freq_snr * W).sum(KDIMS))
     
     k = W.kx + W.ky * 1j
@@ -516,12 +521,10 @@ def estimate_parameters_block(
     # arbitrarily setting max period to 2x length of data interval
     max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
     period = 1 / (60 * wmean_freq)  # minutes
-    period = period.where(
-        (wmean_freq > 0) & (period <= max_period)
-    )
+    period = period.where((wmean_freq > 0) & (period <= max_period))
     wavelength = 1 / abs(wmean_wavevector)  # km
     
-    return xr.Dataset({
+    params = xr.Dataset({
         "period": period,
         "wavelength": wavelength,
         "phase_velocity": phase_velocity,
@@ -531,4 +534,6 @@ def estimate_parameters_block(
         "power_threshold": power_threshold,
         "S0": S0,
         "S2": S2,
-    })
+    }).drop_vars(["kx", "ky"])
+
+    return params
