@@ -453,18 +453,16 @@ def estimate_parameters_block(
             (img_patches - img_patches.mean(["kx", "ky"]))
             / img_patches.std(["kx", "ky"])
         )
-    
+
+    # fftshift shifts all axes by default, apply_ufunc puts input_core_dims at the end    
     F = (
         xr.apply_ufunc(
-            lambda x: fftshift(fft2(x * window, s=(Nfft, Nfft))),
+            lambda x: fftshift(fft2(x * window, s=(Nfft, Nfft)), axes=(-2, -1)),
             img_patches,
             input_core_dims=[KDIMS],
             output_core_dims=[KDIMS],
             output_dtypes=[np.complex64],
-            dask_gufunc_kwargs={
-                "output_sizes": {"kx": Nfft, "ky": Nfft},
-                "allow_rechunk": False,
-            },
+            dask_gufunc_kwargs={"output_sizes": {"kx": Nfft, "ky": Nfft}},
             dask="parallelized",
             exclude_dims={"kx", "ky"}
         )

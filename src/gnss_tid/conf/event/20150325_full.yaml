@@ -14,4 +14,4 @@ pointdata:
   el_min: 30
   q_thresh: .998
   noise_max: 100
-  n_jobs: 20
+  n_jobs: 16

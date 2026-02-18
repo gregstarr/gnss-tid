@@ -2,7 +2,6 @@ from pathlib import Path
 from datetime import datetime
 import logging
 
-import h5py
 import pandas
 import xarray
 import numpy as np
@@ -43,11 +42,27 @@ class PointData:
         if n_jobs == 1:
             results = []
             for file in files:
-                results.append(load_file(file, self.latitude_limits, self.longitude_limits, time_limits, el_min, noise_max))
+                results.append(
+                    load_file(
+                        file,
+                        self.latitude_limits,
+                        self.longitude_limits,
+                        time_limits,
+                        el_min,
+                        noise_max,
+                    )
+                )
         else:
             @delayed
             def fn(file):
-                return load_file(file, self.latitude_limits, self.longitude_limits, time_limits, el_min, noise_max)
+                return load_file(
+                    file,
+                    self.latitude_limits,
+                    self.longitude_limits,
+                    time_limits,
+                    el_min,
+                    noise_max,
+                )
 
             logger.info("loading files")
             with tqdm_joblib(desc="loading files", total=len(files)):
