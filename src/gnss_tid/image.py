@@ -71,8 +71,9 @@ class ScipyRbfImageMaker:
         self.xp = None
         self.yp = None
 
-    def initialize(self, x: np.ndarray, y: np.ndarray):
-        boundary_coords = mtpi.grid.get_boundary_coords(x, y)
+    def initialize(self, x: np.ndarray, y: np.ndarray, boundary_coords=None):
+        if boundary_coords is None:
+            boundary_coords = mtpi.grid.get_boundary_coords(x, y)
         for k, v in boundary_coords.items():
             logger.info("image boundary %s: %.2f", k, v)
         x_grid, y_grid = mtpi.grid.generate_grid(self.hres, boundary_coords)

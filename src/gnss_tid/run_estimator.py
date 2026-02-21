@@ -15,21 +15,22 @@ def main(cfg):
     
     data = xarray.open_dataset(
         "autofocus.h5",
-        chunks={"time": -1, "x": cfg.step_size, "y": cfg.step_size},
+        chunks={"time": -1, "x": cfg.block_size, "y": cfg.block_size},
     )
     logging.info(data)
     
-    params = gnss_tid.parameter.estimate_parameters_block_unopt(
+    params = gnss_tid.parameter.estimate_parameters_dask(
         data,
         Nfft=cfg.nfft,
         block_size=cfg.block_size,
         step_size=cfg.step_size,
         normalize=cfg.norm,
-    ).chunk("auto")
-    with TqdmCallback(desc="estimating parameters"):
-        params.to_zarr("params.zarr", mode="w")
-    
+    )
+    params.to_zarr("params.zarr", mode="w")
+
     client.close()
+    
+    logging.info("SUCCESS")
 
 
 if __name__ == "__main__":

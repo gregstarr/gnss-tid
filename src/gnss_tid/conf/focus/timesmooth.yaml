@@ -11,6 +11,6 @@ block_step: 16
 kaiser_beta: 1
 density_thresh: 10
 time_window: 15
-logscale_objective: True
+logscale_objective: false
 n_jobs: 16
 tec_name: dtec1

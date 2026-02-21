@@ -1,17 +1,13 @@
 import time
+import logging
+from math import ceil
 
 import dask
-import dask.array
+import dask.array as da
 import numpy as np
 import xarray as xr
 from scipy.fft import fft2, fftfreq, fftshift
 from scipy.signal.windows import kaiser
-
-import holoviews as hv
-from holoviews import opts
-import colorcet as cc
-from bokeh.models import PrintfTickFormatter
-import panel as pn
 
 
 def estimate_noise_hs74(spectrum, navg=1, nnoise_min=1):
@@ -96,6 +92,11 @@ def estimate_parameters_block_debug(
         smooth_win=9,
         kaiser_beta=5,
     ):
+    import holoviews as hv
+    from holoviews import opts
+    import colorcet as cc
+    from bokeh.models import PrintfTickFormatter
+    import panel as pn
     t0 = time.perf_counter()
     print("start")
     hres = (data.x[1] - data.x[0]).item()
@@ -514,7 +515,8 @@ def estimate_parameters_block(
         )
     ) / (2 * kres)  # m/s
 
-    phase_velocity = 1000 * wmean_freq / wmean_wavevector  # m/s
+    d = wmean_wavevector / abs(wmean_wavevector)
+    phase_velocity = 1000 * d * wmean_freq / abs(wmean_wavevector)  # m/s
 
     # arbitrarily setting max period to 2x length of data interval
     max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
@@ -534,4 +536,205 @@ def estimate_parameters_block(
         "S2": S2,
     }).drop_vars(["kx", "ky"])
 
+    return params
+
+
+def log_ntasks(name, data):
+    logging.debug(f"{name}: {len(data.__dask_graph__())} tasks")
+
+
+def get_chunk_size(shape, step, patch, Nfft, mem, cx, cy=None):
+    if cy is None:
+        cy = cx
+    
+    if cx == -1:
+        cx = shape[-1]
+    if cy == -1:
+        cy = shape[-2]
+    
+    npx = (shape[-1] - patch) // step + 1
+    npy = (shape[-2] - patch) // step + 1
+    px = min(npx, ceil(cx / step))
+    py = min(npy, ceil(cy / step))
+    sf = (2 * Nfft**2 * px * py)
+    sr = cx * cy
+    factor = sf / sr
+    logging.debug(f"img chunk target: {(mem/factor)/(2**20)}MB")
+    ct = ceil(((mem/4) / factor) / sr)
+    if (shape[1] // 2) < ct < shape[1]:
+        logging.debug("balancing chunk size")
+        ct = shape[1] // 2
+    return (1, ct, cy, cx)
+
+
+def estimate_parameters_dask(
+        data: xr.Dataset,
+        Nfft: int = 128,
+        block_size: int = 32,
+        step_size: int = 8,
+        smooth_win: int = 9,
+        kaiser_beta: float = 5,
+        normalize: str | None = None,
+        q_threshold: float = .95,
+        density_threshold: int = 5,
+        chunk_mem: float = 200 * 2 ** 20,
+):
+    img = data.image.astype("float32")
+    if "density" in data:
+        img = img.where(data.density >= density_threshold, 0)
+    
+    x_vals = img.x.values
+    y_vals = img.y.values
+    time_vals = img.time.values
+    with_trials = img.ndim == 4  # trial, time, y, x
+
+    hres = x_vals[1] - x_vals[0]
+    wavenum = da.fft.fftshift(da.fft.fftfreq(Nfft, hres)).astype("float32")
+    dt = (data.time[1] - data.time[0]).dt.total_seconds().data.astype("float32")
+    # setting max period to length of data interval
+    max_period = (data.time[-1] - data.time[0]).dt.total_seconds().data / 60  # minutes
+
+    window = kaiser(block_size, kaiser_beta).astype("float32")
+    window = np.outer(window, window) / np.sum(window)
+    window = np.expand_dims(window, (0, 1, 2, 3))
+    
+    # ensure dim order
+    if with_trials:
+        trial_vals = img.trial.values
+        img = img.transpose("trial", "time", "y", "x")
+        img = img.data
+    else:
+        img = img.transpose("time", "y", "x")
+        img = da.expand_dims(img.data, 0)
+    
+    log_ntasks("img", img)
+
+    # sliding window over spatial dims is best if spatial dims are in single chunk
+    # TODO: check if chunks are already small enough before doing this
+    # img = da.rechunk(img, block_size_limit=chunk_mem/factor, balance=True)
+    cx = -1
+    chunk_size = get_chunk_size(img.shape, step_size, block_size, Nfft, chunk_mem, cx)
+    img = da.rechunk(img, chunk_size)
+    log_ntasks("img rechunk", img)
+    logging.debug(img)
+    logging.debug(f"img chunk size: {np.prod(img.chunksize)*4/(2**20)}MB")
+    
+    # IMG NOW DASK ARRAY
+    if normalize == "image":
+        img = img - da.mean(img, axis=(-2, -1), keepdims=True)
+        s = da.std(img, axis=(-2, -1), keepdims=True)
+        img = da.where(s > 0, img / s, 0)
+
+    # (trial, time, py, px, ky, kx)
+    x = da.overlap.sliding_window_view(
+        img,
+        (block_size, block_size),
+        (-2, -1),
+        False,
+    )[:, :, ::step_size, ::step_size]
+    log_ntasks("patchify", x)
+
+    if normalize == "patch":
+        x = x - da.mean(x, axis=(-2, -1), keepdims=True)
+        s = da.std(x, axis=(-2, -1), keepdims=True)
+        x = da.where(s > 0, x / s, 0)
+        log_ntasks("normalize patches", x)
+    
+    x = x * window
+    log_ntasks("window", x)
+    logging.debug(x)
+    F = da.fft.fftshift(da.fft.fft2(x, s=(Nfft, Nfft)), axes=(-2, -1))
+    log_ntasks("FFT", F)
+    logging.debug(F)
+    logging.debug(f"FFT chunk size: {np.prod(F.chunksize)*8/(2**20)}MB")
+    
+    power = abs(F) ** 2
+    log_ntasks("power", power)
+
+    power_threshold = da.quantile(power, q_threshold, (-2, -1), keepdims=True)
+    log_ntasks("power thresh", power_threshold)
+
+    W = da.where(power > power_threshold, power, da.nan)
+    log_ntasks("threshold", W)
+    W = W / da.nansum(W, axis=(-2, -1), keepdims=True)
+    log_ntasks("normalize W", W)
+    power_threshold = power_threshold[..., 0, 0]
+
+    k = da.expand_dims(wavenum[:, None] + 1j * wavenum[:, None], axis=(0, 1, 2, 3))
+    k2 = k ** 2
+    S2 = da.nansum(W * k2, axis=(-2, -1))
+    log_ntasks("S2", S2)
+    direction = da.exp(1j * da.angle(S2) / 2)
+    log_ntasks("direction", direction)
+
+    # positive / negative projection from S2
+    m = da.sign((da.expand_dims(direction, axis=(4, 5)) * k.conj()).real)
+    log_ntasks("m", m)
+    wmean_wavevector = da.nansum(W * k * m, axis=(-2, -1))
+    log_ntasks("weighted mean wavevector", wmean_wavevector)
+
+    freq = da.angle(F[:, 1:] * da.conj(F[:, :-1])) / (TAU * dt)
+    log_ntasks("freq", freq)
+    # need extra pad at back because difference lost us 1 element
+    padding = 6 * [(0, 0)]
+    padding[1] = ((smooth_win - 1) // 2, (smooth_win - 1) // 2 + 1)
+    freq = da.pad(freq, padding)
+    log_ntasks("pad f", freq)
+
+    f_windows = da.overlap.sliding_window_view(freq, smooth_win, 1, False)
+    log_ntasks("window f", f_windows)
+    freq = da.mean(f_windows, -1)
+    log_ntasks("window freq mean", freq)
+    freq_snr = da.std(f_windows, -1)
+    log_ntasks("freq std", freq_snr)
+    freq_snr = 1 / da.nansum(freq_snr * W, axis=(-2, -1))
+    log_ntasks("freq std weighted mean", freq_snr)
+    freq_snr = da.where(da.isfinite(freq_snr), freq_snr, da.nan)
+    log_ntasks("freq std filter", freq_snr)
+    wmean_freq = da.nansum(abs(W * freq * m), axis=(-2, -1))
+    log_ntasks("weighted mean freq", wmean_freq)
+    period = 1 / (60 * wmean_freq)  # minutes
+    period = da.where((wmean_freq > 0) & (period <= max_period), period, da.nan)
+    log_ntasks("period", period)
+    wavelength = 1 / abs(wmean_wavevector)  # km
+    log_ntasks("wavelength", wavelength)
+
+    d = wmean_wavevector / abs(wmean_wavevector)
+    phase_velocity = 1000 * d * wmean_freq / abs(wmean_wavevector)  # m/s
+    log_ntasks("phase velocity", phase_velocity)
+
+    dims = ["time", "py", "px"]
+    coords = {
+        "px": x_vals[block_size//2:-block_size//2:step_size],
+        "py": y_vals[block_size//2:-block_size//2:step_size],
+        "time": time_vals,
+    }
+    if with_trials:
+        dims = ["trial"] + dims
+        coords["trial"] = trial_vals
+        params = xr.Dataset(
+            data_vars={
+                "period": (dims, period),
+                "wavelength": (dims, wavelength),
+                "phase_velocity": (dims, phase_velocity),
+                "freq_snr": (dims, freq_snr),
+                "power_threshold": (dims, power_threshold),
+            },
+            coords=coords,
+        )
+        params = params.chunk(trial=10, time=-1, px=-1, py=-1)
+    else:
+        params = xr.Dataset(
+            data_vars={
+                "period": (dims, period[0]),
+                "wavelength": (dims, wavelength[0]),
+                "phase_velocity": (dims, phase_velocity[0]),
+                "freq_snr": (dims, freq_snr[0]),
+                "power_threshold": (dims, power_threshold[0]),
+            },
+            coords=coords,
+        )
+        params = params.chunk(time=-1, px=-1, py=-1)
+    
+    log_ntasks("phase velocity final chunk", params.phase_velocity.data)
     return params

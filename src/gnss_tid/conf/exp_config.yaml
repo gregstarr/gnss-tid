@@ -1,14 +1,15 @@
 defaults:
-  - client: sagan_exp
+  - client: sagan
   - _self_
 
 block_size: 32
 step_size: 8
 nfft: 128
 norm: patch
-wave_type: planar
+wave_type: spherical
 
 n_trials: 1200
+batch_size: 20
 
 hydra:
   job_logging:

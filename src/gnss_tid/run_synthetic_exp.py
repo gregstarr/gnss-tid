@@ -1,14 +1,13 @@
 import logging
-import functools
 import shutil
 from datetime import datetime
+from math import ceil
+from time import perf_counter
 
-import zarr
 import hydra
-import dask
 from dask.distributed import Client
 import xarray
-from numcodecs import Blosc
+from zarr.codecs import BloscCodec, BloscCname, BloscShuffle
 
 import gnss_tid.synthetic
 import gnss_tid.parameter
@@ -27,6 +26,7 @@ def save_data(data_fn, wave_type, n_trials):
         xlim=(-1500, 1500),
         ylim=(-1500, 1500),
         hres=20,
+        batch_size=10,
     )
     if wave_type == "spherical":
         data = gnss_tid.synthetic.spherical_model(center=(0, 0), **model_options)
@@ -35,72 +35,59 @@ def save_data(data_fn, wave_type, n_trials):
     else:
         raise Exception(wave_type)
     
-    compressor = Blosc(cname="lz4", clevel=5, shuffle=Blosc.BITSHUFFLE)
-    encoding = {var: {"compressor": compressor} for var in data.data_vars}
+    compressor = BloscCodec(cname=BloscCname.lz4, clevel=5, shuffle=BloscShuffle.shuffle)
+    encoding = {var: {"compressors": compressor} for var in data.data_vars}
     logging.info("saving data to zarr")
-    data.to_zarr(data_fn, mode="w", encoding=encoding, consolidated=True)
+    data.to_zarr(data_fn, mode="w", encoding=encoding)
 
 
 @hydra.main(config_path="conf", config_name="exp_config", version_base=None)
 def main(cfg):
     try:
-        print("ZARR:", zarr.__version__)
-        import warnings
-        warnings.filterwarnings("ignore", category=RuntimeWarning)
-        dask.config.set({
-            "distributed.worker.memory.target": 0.50,
-            "distributed.worker.memory.spill": 0.60,
-            "distributed.worker.memory.pause": 0.85,
-            "distributed.worker.memory.terminate": 0.95,
-        })
-        
         client: Client = hydra.utils.instantiate(cfg.client)
-        print(client.dashboard_link)
+        logging.info(client.dashboard_link)
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         data_fn = f"/disk1/tid/users/starr/results/{stamp}_data_{cfg.wave_type}.zarr"
         save_data(data_fn, cfg.wave_type, cfg.n_trials)
-        data = xarray.open_zarr(data_fn).chunk(trial=1, time=-1, x=-1, y=-1)
-        hres = float(data.x.isel(x=1).values - data.x.isel(x=0).values)
-        print(hres)
-        
-        estimator = functools.partial(
-            gnss_tid.parameter.estimate_parameters_block,
-            hres=hres,
-            Nfft=cfg.nfft,
-            block_size=cfg.block_size,
-            step_size=cfg.step_size,
-            normalize=cfg.norm,
-        )
+        data = xarray.open_zarr(data_fn)
+        logging.info("DATA")
+        logging.info(data)
 
-        def func(block):
-            params = estimator(block)
-            return params
-            
         output_fn = f"/disk1/tid/users/starr/results/{stamp}_results_{cfg.wave_type}.zarr"
-        
-        logging.info("INITIALIZING")
-        # template must have full output size
-        template = (
-            func(data.isel(trial=0))
-            .expand_dims(trial=data.trial)
-            .assign_coords(
-                snr=("trial", data.snr.values),
-                tau=("trial", data.tau.values),
-                lam=("trial", data.lam.values),
+        logging.info("RUNNING")
+        n = data.sizes["trial"]
+        n_batches = ceil(n / cfg.batch_size)
+        total_time = 0
+        for b in range(n_batches):
+            logging.info(f"running batch {b + 1} / {n_batches}")
+            t0 = perf_counter()
+            batch_trials = slice(b * cfg.batch_size, min((b + 1) * cfg.batch_size, n))
+            params = gnss_tid.parameter.estimate_parameters_dask(
+                data.isel(trial=batch_trials),
+                Nfft=cfg.nfft,
+                block_size=cfg.block_size,
+                step_size=cfg.step_size,
+                normalize=cfg.norm,
             )
-            .chunk(px=-1, py=-1, time=-1, trial=1)
-        )
-
-        logging.info("RUNNING TRIALS")
-        store = zarr.DirectoryStore(output_fn)
-        params = data.map_blocks(func, template=template)
-        
-        print("PARAMS")
-        print(params)
-        params.to_zarr(store, mode="w")
+            if b == 0:
+                params.to_zarr(output_fn, mode="w")
+            else:
+                params.to_zarr(output_fn, append_dim="trial")
+            
+            batch_duration = perf_counter() - t0
+            total_time += batch_duration
+            logging.info(f"batch {b+1}: {batch_duration:.2f} s")
+            logging.info(f"total_time {total_time/60:.2f} min")
+            logging.info(f"average time per batch {total_time/(b+1):.2f} s")
+            logging.info(f"average time per trial {total_time/batch_trials.stop:.2f} s")
 
         client.close()
+
+        if not cfg.save:
+            logging.info("CLEANUP")
+            shutil.rmtree(data_fn, ignore_errors=True)
+            shutil.rmtree(output_fn, ignore_errors=True)
 
         logging.info("FINISHED")
         logging.info("OUTPUT: %s", output_fn)
@@ -108,8 +95,8 @@ def main(cfg):
         logging.info("CLEANUP")
         shutil.rmtree(data_fn, ignore_errors=True)
         shutil.rmtree(output_fn, ignore_errors=True)
+        logging.exception("error occurred", exc_info=True, stack_info=True)
         raise e
-
 
 
 if __name__ == "__main__":
