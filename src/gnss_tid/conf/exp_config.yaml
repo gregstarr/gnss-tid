@@ -10,6 +10,7 @@ wave_type: spherical
 
 n_trials: 1200
 batch_size: 20
+save: true
 
 hydra:
   job_logging:

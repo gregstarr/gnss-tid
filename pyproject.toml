@@ -54,5 +54,10 @@ torch = [
   { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
 ]
 
+[dependency-groups]
+dev = [
+    "nb-clean>=4.0.1",
+]
+
 [tool.uv]
 build-constraint-dependencies = ["numpy<2.3"]

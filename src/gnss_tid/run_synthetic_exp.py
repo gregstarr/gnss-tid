@@ -3,14 +3,18 @@ import shutil
 from datetime import datetime
 from math import ceil
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 import hydra
-from dask.distributed import Client
 import xarray
 from zarr.codecs import BloscCodec, BloscCname, BloscShuffle
 
 import gnss_tid.synthetic
 import gnss_tid.parameter
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
+    from dask.distributed import Client
 
 
 def save_data(data_fn, wave_type, n_trials):
@@ -42,7 +46,7 @@ def save_data(data_fn, wave_type, n_trials):
 
 
 @hydra.main(config_path="conf", config_name="exp_config", version_base=None)
-def main(cfg):
+def main(cfg: DictConfig):
     try:
         client: Client = hydra.utils.instantiate(cfg.client)
         logging.info(client.dashboard_link)
@@ -84,13 +88,15 @@ def main(cfg):
 
         client.close()
 
-        if not cfg.save:
-            logging.info("CLEANUP")
-            shutil.rmtree(data_fn, ignore_errors=True)
-            shutil.rmtree(output_fn, ignore_errors=True)
-
         logging.info("FINISHED")
         logging.info("OUTPUT: %s", output_fn)
+
+        if cfg.get("save", True):
+            return
+        
+        logging.info("CLEANUP")
+        shutil.rmtree(data_fn, ignore_errors=True)
+        shutil.rmtree(output_fn, ignore_errors=True)
     except Exception as e:
         logging.info("CLEANUP")
         shutil.rmtree(data_fn, ignore_errors=True)
