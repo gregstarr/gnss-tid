@@ -29,6 +29,7 @@ class PointData:
         q_thresh: float = .995,
         noise_max: float = 100,
         n_jobs: int = 16,
+        pbar: bool = True,
     ):
         self.latitude_limits = latitude_limits
         self.longitude_limits = longitude_limits
@@ -47,12 +48,18 @@ class PointData:
         else:
             @delayed
             def fn(file):
-                return load_file(file, self.latitude_limits, self.longitude_limits, time_limits, el_min, noise_max)
-
-            logger.info("loading files")
-            with tqdm_joblib(desc="loading files", total=len(files)):
+                try:
+                    return load_file(file, self.latitude_limits, self.longitude_limits, time_limits, el_min, noise_max)
+                except:
+                    return 
+            if pbar:
+                logger.info("loading files")
+                with tqdm_joblib(desc="loading files", total=len(files)):
+                    with Parallel(n_jobs=n_jobs) as pool:
+                        results = pool(fn(f) for f in files)
+            else:
                 with Parallel(n_jobs=n_jobs) as pool:
-                    results = pool(fn(f) for f in files)
+                        results = pool(fn(f) for f in files)
 
         logger.info("combining files")
         rx_names = []
