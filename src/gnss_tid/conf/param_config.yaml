@@ -2,12 +2,15 @@ defaults:
   - client: sagan
   - _self_
 
-folder: ???
+folder: outputs/20241206
 
 block_size: 32
 step_size: 8
 nfft: 128
-norm: patch
+norm: image
+q_threshold: 0.95
+
+output_fn: params_image_95.zarr
 
 hydra:
   run:

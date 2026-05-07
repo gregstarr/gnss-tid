@@ -1,5 +1,5 @@
 _target_: dask.distributed.Client
 processes: true
-n_workers: 4
-threads_per_worker: 4
-memory_limit: 40GiB
+n_workers: 1
+threads_per_worker: 6
+# memory_limit: 64GiB

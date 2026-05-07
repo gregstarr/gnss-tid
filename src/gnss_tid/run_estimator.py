@@ -25,8 +25,10 @@ def main(cfg):
         block_size=cfg.block_size,
         step_size=cfg.step_size,
         normalize=cfg.norm,
+        q_threshold=cfg.get("q_threshold", 0.95)
     )
-    params.to_zarr("params.zarr", mode="w")
+    output_name = cfg.get("output_fn", "params.zarr")
+    params.to_zarr(output_name, mode="w")
 
     client.close()
     

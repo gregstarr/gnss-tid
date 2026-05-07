@@ -11,8 +11,6 @@ from tqdm_joblib import tqdm_joblib
 from .coords import Local2D, aer2ipp
 from .utils import normalize_paths
 
-logger = logging.getLogger(__name__)
-
 
 class PointData:
     """loads observations from file, computes IPPs
@@ -25,7 +23,7 @@ class PointData:
         longitude_limits: list,
         time_limits: list,
         el_min: float = 0,
-        q_thresh: float = .995,
+        q_thresh: float = .99,
         noise_max: float = 100,
         n_jobs: int = 16,
     ):
@@ -64,20 +62,29 @@ class PointData:
                     noise_max,
                 )
 
-            logger.info("loading files")
+            logging.info("loading files")
             with tqdm_joblib(desc="loading files", total=len(files)):
                 with Parallel(n_jobs=n_jobs) as pool:
                     results = pool(fn(f) for f in files)
 
-        logger.info("combining files")
+        n_rejected = sum([1 for r in results if r is None])
+        logging.info(f"files {n_rejected = }")
+        logging.info(f"file {100*n_rejected/len(files):.2f}% reject rate")
+        logging.info("combining files")
         rx_names = []
         rx_positions = []
         data = []
-        for ii, (d, pos, name) in enumerate(filter(lambda x: x is not None, results)):
+        debug_table = {}
+
+        for ii, (d, pos, name, dbg) in enumerate(filter(lambda x: x is not None, results)):
             rx_names.append(name)
             rx_positions.append(pos)
             d["rx"] = ("n", np.full(d.sizes["n"], ii))
             data.append(d)
+            debug_table[name] = dbg
+
+        self.debug_table = pandas.DataFrame.from_dict(debug_table, orient="index")
+
         self.rx_names = np.stack(rx_names)
         self.rx_positions = np.stack(rx_positions, 0)
         self._data = xarray.concat(data, dim="n")
@@ -88,7 +95,8 @@ class PointData:
         los_id, self.unique_los = pandas.factorize(los)
         self._data = self._data.assign_coords(los_id=("n", los_id))
         self.times = np.unique(self._data.time)
-        logger.info("data ready")
+        
+        logging.info("data ready")
 
     def get_time_slices(self, window: int, step: int):
         n_times = self.times.shape[0]
@@ -129,19 +137,23 @@ class PointData:
                 x:          float32
                 y:          float32
         """
-        time_mask = np.in1d(self._data.time, self.times[time_slice])
+        time_mask = np.isin(self._data.time.values, self.times[time_slice])
+        logging.info(f"points in time range: {time_mask.sum()}")
+        t = self.times[time_slice]
+        logging.info(f"time range: {t[0]}, {t[-1]}")
+
         data = (
             self._data.isel(n=time_mask)
             .drop_vars(["sv", "time", "rx"])
             .groupby("los_id").mean()
             .assign_attrs(time=self.times[time_slice.start], height=h)
         )
-        z = abs(data[["dtec0", "dtec1", "dtec3", "dtecp"]])
-        q_mask = (z <= z.quantile(self.q_thresh)).to_array().all("variable")
-        data = data.isel(los_id=q_mask.values)
+        for v in ["dtec0", "dtec1", "dtec3", "dtecp"]:
+            z = abs(data[v])
+            data[v] = data[v].where(z < z.quantile(self.q_thresh).drop_vars("quantile"))
 
         if data.az.size == 0:
-             logger.warning("empty az data: %s", time_slice)
+             logging.warning("empty az data: %s", time_slice)
              return None
         # aer2ipp requires rx_positions and az/el to have corresponding dimensions
         data["rx"] = ("los_id", self.unique_los.get_level_values(0).values[data.los_id])
@@ -159,7 +171,7 @@ class PointData:
             .query(los_id=f"lon > {self.longitude_limits[0]} & lon < {self.longitude_limits[1]}")
         )
         if data.lat.size == 0:
-            logger.warning("empty lat data: %s", time_slice)
+            logging.warning("empty lat data: %s", time_slice)
             return None
         
         if use_local_cs:
@@ -209,10 +221,16 @@ def load_file(
         return
 
     el = f.el.values.astype(float)
+    az = f.az.values.astype(float)
+    sv = f.sv.values
     tec_noise  = f.tec_sigma.values.astype(float)
     
-    valid = valid_time & (el >= el_min) & (tec_noise <= noise_max)
+    fin_mask = np.isfinite(time) & np.isfinite(az) & np.isfinite(el)
+    valid_el = el >= el_min
+    valid_noise = tec_noise <= noise_max
+    valid = fin_mask & valid_time & valid_el# & valid_noise
     
+    az = az[valid]
     el = el[valid]
     time = time[valid]
     tec_noise  = tec_noise[valid]
@@ -221,9 +239,8 @@ def load_file(
     dtec2 = f.dtec2.values.astype(float)[valid]
     dtec3 = f.dtec3.values.astype(float)[valid]
     dtecp = f.dtecp.values.astype(float)[valid]
-    az = f.az.values.astype(float)[valid]
     tec_snr  = f.snr.values.astype(float)[valid]
-    sv = f.sv.values[valid]
+    sv = sv[valid]
     
     data = xarray.Dataset(
         data_vars={
@@ -240,5 +257,27 @@ def load_file(
             "time": ("n", time),
         },
     )
-    missing = data.isnull().to_array().any("variable")
-    return data.isel(n=~missing), rx_position, rx_name
+    
+    debug = dict(
+        valid_mean=valid.mean(),
+        valid_sum=valid.sum(),
+        invalid_sum=(~valid).mean(),
+        fin_mask_mean=fin_mask.mean(),
+        fin_mask_sum=fin_mask.sum(),
+        valid_time_mean=valid_time.mean(),
+        valid_time_sum=valid_time.sum(),
+        invalid_time_sum=(~valid_time).sum(),
+        valid_el_mean=valid_el.mean(),
+        valid_el_sum=valid_el.sum(),
+        invalid_el_sum=(~valid_el).sum(),
+        valid_noise_mean=valid_noise.mean(),
+        valid_noise_sum=valid_noise.sum(),
+        invalid_noise_sum=(~valid_noise).sum(),
+        unique_valid_svs=np.unique(sv),
+        unique_svs=np.unique(f.sv.values),
+    )
+    for v in ["dtec0", "dtec1", "dtec2", "dtec3", "dtecp"]:
+        debug[f"{v}_null_sum"] = data[v].isnull().sum().item()
+        debug[f"{v}_null_mean"] = data[v].isnull().mean().item()
+
+    return data, rx_position, rx_name, debug

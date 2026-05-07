@@ -95,8 +95,9 @@ class ScipyRbfImageMaker:
             logger.warning("ImageMaker not initialized. Initializing from first inputs.")
             self.initialize(x, y)
         
-        pts = np.column_stack((x, y))
-        rbf = RBFInterpolator(pts, tec, **self.kwargs)
+        fin = np.isfinite(tec)
+        pts = np.column_stack((x, y))[fin]
+        rbf = RBFInterpolator(pts, tec[fin], **self.kwargs)
 
         img = rbf(self.points)
         img = img.reshape(self.shape)

@@ -10,8 +10,6 @@ import numpy as np
 
 from .coords import Local2D, aer2ipp
 
-logger = logging.getLogger(__name__)
-
 
 class PointData:
     """loads observations from file, computes IPPs
@@ -99,11 +97,16 @@ class PointData:
             .dropna("rx", how="all", subset=["tec"])
             .dropna("prn", how="all", subset=["az"])
             .dropna("rx", how="all", subset=["az"])
+        )
+        logging.info(f"points in time range: {data.sizes}")
+        logging.info(f"time range: {data.time.values[0]}, {data.time.values[-1]}")
+        data = (
+            data
             .mean(dim="time")
             .assign_attrs(time=self._data.time.values[time_slice.start], height=h)
         )
         if data.az.size == 0:
-            logger.warning("empty az data: %s", time_slice)
+            logging.warning("empty az data: %s", time_slice)
             return None
         # aer2ipp requires rx_positions and az/el to have corresponding dimensions
         ipp_lat, ipp_lon = aer2ipp(data.az, data.el, data.rx_position, h)
@@ -111,7 +114,7 @@ class PointData:
         # now reshape to (time, rx-prn pair)
         data = (
             data.assign(lat=ipp_lat.drop_vars("geo"), lon=ipp_lon)
-            .drop_vars(["rx_position", "az", "el"])
+            .drop_vars("rx_position")
             .drop_dims("geo")
             .stack(los=("rx", "prn"))
             .dropna("los")
@@ -120,7 +123,7 @@ class PointData:
             .query(los=f"lon > {self.longitude_limits[0]} & lon < {self.longitude_limits[1]}")
         )
         if data.lat.size == 0:
-            logger.warning("empty lat data: %s", time_slice)
+            logging.warning("empty lat data: %s", time_slice)
             return None
         local_coords = Local2D.from_geodetic(*self.get_coord_center(), h)
         x, y = local_coords.convert_from_spherical(data.lat.values, data.lon.values)

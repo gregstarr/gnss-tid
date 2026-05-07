@@ -621,8 +621,8 @@ def estimate_parameters_dask(
     
     # IMG NOW DASK ARRAY
     if normalize == "image":
-        img = img - da.mean(img, axis=(-2, -1), keepdims=True)
-        s = da.std(img, axis=(-2, -1), keepdims=True)
+        img = img - da.nanmean(img, axis=(-2, -1), keepdims=True)
+        s = da.nanstd(img, axis=(-2, -1), keepdims=True)
         img = da.where(s > 0, img / s, 0)
 
     # (trial, time, py, px, ky, kx)
@@ -635,8 +635,8 @@ def estimate_parameters_dask(
     log_ntasks("patchify", x)
 
     if normalize == "patch":
-        x = x - da.mean(x, axis=(-2, -1), keepdims=True)
-        s = da.std(x, axis=(-2, -1), keepdims=True)
+        x = x - da.nanmean(x, axis=(-2, -1), keepdims=True)
+        s = da.nanstd(x, axis=(-2, -1), keepdims=True)
         x = da.where(s > 0, x / s, 0)
         log_ntasks("normalize patches", x)
     
@@ -654,15 +654,19 @@ def estimate_parameters_dask(
     power_threshold = da.quantile(power, q_threshold, (-2, -1), keepdims=True)
     log_ntasks("power thresh", power_threshold)
 
-    W = da.where(power > power_threshold, power, da.nan)
+    W = da.where(power > power_threshold, power, 0)
     log_ntasks("threshold", W)
-    W = W / da.nansum(W, axis=(-2, -1), keepdims=True)
+    power_signal = da.sum(W, axis=(-2, -1))
+    power_noise = da.sum((power < power_threshold) * power, axis=(-2, -1))
+    power_total = da.sum(power, axis=(-2, -1))
+    W = W / da.sum(W, axis=(-2, -1), keepdims=True)
     log_ntasks("normalize W", W)
     power_threshold = power_threshold[..., 0, 0]
 
-    k = da.expand_dims(wavenum[:, None] + 1j * wavenum[:, None], axis=(0, 1, 2, 3))
+    k = da.expand_dims(wavenum[None, :] + 1j * wavenum[:, None], axis=(0, 1, 2, 3))
     k2 = k ** 2
-    S2 = da.nansum(W * k2, axis=(-2, -1))
+    S0 = da.sum(W * k * da.conj(k), axis=(-2, -1)).real
+    S2 = da.sum(W * k2, axis=(-2, -1))
     log_ntasks("S2", S2)
     direction = da.exp(1j * da.angle(S2) / 2)
     log_ntasks("direction", direction)
@@ -670,28 +674,29 @@ def estimate_parameters_dask(
     # positive / negative projection from S2
     m = da.sign((da.expand_dims(direction, axis=(4, 5)) * k.conj()).real)
     log_ntasks("m", m)
-    wmean_wavevector = da.nansum(W * k * m, axis=(-2, -1))
+    wmean_wavevector = da.sum(W * k * m, axis=(-2, -1))
     log_ntasks("weighted mean wavevector", wmean_wavevector)
 
+    # forward difference phase derivative estimate
     freq = da.angle(F[:, 1:] * da.conj(F[:, :-1])) / (TAU * dt)
     log_ntasks("freq", freq)
     # need extra pad at back because difference lost us 1 element
     padding = 6 * [(0, 0)]
     padding[1] = ((smooth_win - 1) // 2, (smooth_win - 1) // 2 + 1)
-    freq = da.pad(freq, padding)
+    freq = da.pad(freq, padding, mode="constant", constant_values=da.nan)
     log_ntasks("pad f", freq)
 
     f_windows = da.overlap.sliding_window_view(freq, smooth_win, 1, False)
     log_ntasks("window f", f_windows)
-    freq = da.mean(f_windows, -1)
+    freq = da.nanmean(f_windows, -1)
     log_ntasks("window freq mean", freq)
-    freq_snr = da.std(f_windows, -1)
+    freq_snr = da.nanstd(f_windows, -1)
     log_ntasks("freq std", freq_snr)
-    freq_snr = 1 / da.nansum(freq_snr * W, axis=(-2, -1))
+    freq_snr = 1 / da.sum(freq_snr * W, axis=(-2, -1))
     log_ntasks("freq std weighted mean", freq_snr)
     freq_snr = da.where(da.isfinite(freq_snr), freq_snr, da.nan)
     log_ntasks("freq std filter", freq_snr)
-    wmean_freq = da.nansum(abs(W * freq * m), axis=(-2, -1))
+    wmean_freq = da.sum(abs(W * freq * m), axis=(-2, -1))
     log_ntasks("weighted mean freq", wmean_freq)
     period = 1 / (60 * wmean_freq)  # minutes
     period = da.where((wmean_freq > 0) & (period <= max_period), period, da.nan)
@@ -705,8 +710,8 @@ def estimate_parameters_dask(
 
     dims = ["time", "py", "px"]
     coords = {
-        "px": x_vals[block_size//2:-block_size//2:step_size],
-        "py": y_vals[block_size//2:-block_size//2:step_size],
+        "px": x_vals[block_size//2:-block_size//2 + 1:step_size],
+        "py": y_vals[block_size//2:-block_size//2 + 1:step_size],
         "time": time_vals,
     }
     if with_trials:
@@ -717,8 +722,13 @@ def estimate_parameters_dask(
                 "period": (dims, period),
                 "wavelength": (dims, wavelength),
                 "phase_velocity": (dims, phase_velocity),
-                "freq_snr": (dims, freq_snr),
+                # "freq_snr": (dims, freq_snr),
                 "power_threshold": (dims, power_threshold),
+                "S0": (dims, S0),
+                "S2": (dims, S2),
+                "power_signal": (dims, power_signal),
+                "power_noise": (dims, power_noise),
+                "power_total": (dims, power_total),
             },
             coords=coords,
         )
@@ -729,8 +739,13 @@ def estimate_parameters_dask(
                 "period": (dims, period[0]),
                 "wavelength": (dims, wavelength[0]),
                 "phase_velocity": (dims, phase_velocity[0]),
-                "freq_snr": (dims, freq_snr[0]),
+                # "freq_snr": (dims, freq_snr[0]),
                 "power_threshold": (dims, power_threshold[0]),
+                "S0": (dims, S0[0]),
+                "S2": (dims, S2[0]),
+                "power_signal": (dims, power_signal[0]),
+                "power_noise": (dims, power_noise[0]),
+                "power_total": (dims, power_total[0]),
             },
             coords=coords,
         )
