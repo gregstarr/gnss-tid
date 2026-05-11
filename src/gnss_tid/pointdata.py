@@ -26,6 +26,7 @@ class PointData:
         q_thresh: float = .99,
         noise_max: float = 100,
         n_jobs: int = 16,
+        pbar: bool = True,
     ):
         self.latitude_limits = latitude_limits
         self.longitude_limits = longitude_limits
@@ -37,22 +38,8 @@ class PointData:
 
         files = normalize_paths(files)
 
-        if n_jobs == 1:
-            results = []
-            for file in files:
-                results.append(
-                    load_file(
-                        file,
-                        self.latitude_limits,
-                        self.longitude_limits,
-                        time_limits,
-                        el_min,
-                        noise_max,
-                    )
-                )
-        else:
-            @delayed
-            def fn(file):
+        def load_file_safe(file):
+            try:
                 return load_file(
                     file,
                     self.latitude_limits,
@@ -61,9 +48,24 @@ class PointData:
                     el_min,
                     noise_max,
                 )
+            except Exception:
+                logging.exception("failed to load file %s", file)
+                return None
 
-            logging.info("loading files")
-            with tqdm_joblib(desc="loading files", total=len(files)):
+        if n_jobs == 1:
+            results = []
+            for file in files:
+                results.append(load_file_safe(file))
+        else:
+            @delayed
+            def fn(file):
+                return load_file_safe(file)
+            if pbar:
+                logging.info("loading files")
+                with tqdm_joblib(desc="loading files", total=len(files)):
+                    with Parallel(n_jobs=n_jobs) as pool:
+                        results = pool(fn(f) for f in files)
+            else:
                 with Parallel(n_jobs=n_jobs) as pool:
                     results = pool(fn(f) for f in files)
 
@@ -239,6 +241,7 @@ def load_file(
     dtec2 = f.dtec2.values.astype(float)[valid]
     dtec3 = f.dtec3.values.astype(float)[valid]
     dtecp = f.dtecp.values.astype(float)[valid]
+    roti = f.roti.values.astype(float)[valid]
     tec_snr  = f.snr.values.astype(float)[valid]
     sv = sv[valid]
     
@@ -251,6 +254,7 @@ def load_file(
             "dtec2": ("n", dtec2),
             "dtec3": ("n", dtec3),
             "dtecp": ("n", dtecp),
+            "roti": ("n", roti),
             "tec_noise": ("n", tec_noise),
             "tec_snr": ("n", tec_snr),
             "sv": ("n", sv),
@@ -276,7 +280,7 @@ def load_file(
         unique_valid_svs=np.unique(sv),
         unique_svs=np.unique(f.sv.values),
     )
-    for v in ["dtec0", "dtec1", "dtec2", "dtec3", "dtecp"]:
+    for v in ["dtec0", "dtec1", "dtec2", "dtec3", "dtecp", "roti"]:
         debug[f"{v}_null_sum"] = data[v].isnull().sum().item()
         debug[f"{v}_null_mean"] = data[v].isnull().mean().item()
 
