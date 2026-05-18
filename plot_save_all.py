@@ -1,13 +1,14 @@
 import gnss_tid.pointdata
 import xarray as xr
-import subprocess, os
+import subprocess
+import os
 import numpy as np
 from scipy import ndimage
 from astropy.convolution import convolve, Gaussian2DKernel
 from datetime import datetime, timedelta
 from argparse import ArgumentParser
-import matplotlib.pyplot as plt
-import warnings, re
+import warnings
+import re
 
 warnings.filterwarnings('ignore')
 

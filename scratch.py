@@ -1,5 +1,4 @@
 from gnss_tid.pointdata import PointData
-from gnss_tid.old_pointdata import PointData as old_PointData
 
 def main():
     time_limits = ["20150325_234000", "20150325_235200"]

@@ -23,6 +23,7 @@ dependencies = [
     "pymap3d>=3.2.0",
     "pyproj<3.7",
     "pyzmq<27.0",
+    "ruff>=0.15.13",
     "scikit-image>=0.25.2",
     "scikit-learn<1.8",
     "scipy>=1.16.3",
@@ -34,15 +35,15 @@ dependencies = [
 ]
 
 [project.scripts]
-autofocus = "gnss_tid.main:main"
-param = "gnss_tid.run_estimator:main"
+autofocus = "gnss_tid.cli.autofocus:main"
+param = "gnss_tid.cli.parameters:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-packages = ["src/gnss_tid"]
+packages = ["gnss_tid"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -57,6 +58,7 @@ torch = [
 [dependency-groups]
 dev = [
     "nb-clean>=4.0.1",
+    "pytest>=8.0",
 ]
 
 [tool.uv]

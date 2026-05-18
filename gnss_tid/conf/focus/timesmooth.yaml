@@ -1,0 +1,31 @@
+name: smoothed_spectral
+
+heights:
+  min: 150
+  max: 400
+  step: 10
+
+image:
+  name: rbf
+  hp_freq: .02
+  density_radius: 100.0
+  neighbors: 50
+  kernel: multiquadric
+  smoothing: .3
+
+center:
+  name: stationary
+  max_iter: 500
+  learning_rate: 1.0
+  num_starts: 20
+  reg_strength: .005
+
+hres: 20
+block_size: 32
+block_step: 16
+kaiser_beta: 1
+density_thresh: 10
+time_window: 15
+logscale_objective: false
+n_jobs: 16
+tec_name: dtec1

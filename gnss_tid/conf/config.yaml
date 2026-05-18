@@ -1,0 +1,21 @@
+defaults:
+  - _self_
+  - focus: timesmooth
+  - event: 20150325_full
+    # - debug
+
+output_fn: "autofocus.h5"
+animation_fn: "event.gif"
+
+sample:
+  window: 4
+  step: 2
+
+hydra:
+  job:
+    chdir: true
+  job_logging:
+    formatters:
+      simple:
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        fmt: "[%(asctime)s][%(name)s][%(levelname)s] %(message)s"
