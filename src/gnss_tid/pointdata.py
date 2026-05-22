@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +38,15 @@ OBS_COLUMNS = (
     "tec_noise",
     "tec_snr",
 )
+
+
+@dataclass
+class TimeWindow:
+    """Time window with pre-computed row indices into the observation DataFrame."""
+
+    start_time: np.datetime64
+    end_time: np.datetime64
+    row_indices: np.ndarray
 
 
 def _normalize_time_value(value) -> datetime | np.datetime64:
@@ -229,11 +239,13 @@ def _load_v2_file(
     obs["roti"] = _as_array(f["roti"].values).astype(float)[valid]
     obs = _ensure_columns(obs)
 
-    lookup: dict[str, np.ndarray] = {
-        "rx_name": np.array([rx_name], dtype=object),
-        "rx_position": np.array([rx_position], dtype=float),
+    rx: dict[str, np.ndarray] = {
+        "rx": np.array([rx_name], dtype=object),
+        LOOKUP_GEO[0]: rx_position[0],
+        LOOKUP_GEO[1]: rx_position[1],
+        LOOKUP_GEO[2]: rx_position[2],
     }
-    return obs, lookup
+    return obs, rx
 
 
 def _load_v1_file(
@@ -306,11 +318,13 @@ def _load_v1_file(
     }
     obs = _ensure_columns(obs)
 
-    lookup: dict[str, np.ndarray] = {
-        "rx_name": rx_names,
-        "rx_position": rx_positions,
+    rx: dict[str, np.ndarray] = {
+        "rx": rx_names,
+        LOOKUP_GEO[0]: rx_positions[:, 0],
+        LOOKUP_GEO[1]: rx_positions[:, 1],
+        LOOKUP_GEO[2]: rx_positions[:, 2],
     }
-    return obs, lookup
+    return obs, rx
 
 
 def _load_file(
@@ -378,11 +392,21 @@ def _concat_lookups(lookups: list[dict[str, np.ndarray]]) -> dict[str, np.ndarra
         Combined lookup dictionary
     """
     if not lookups:
-        return {"rx_name": np.array([], dtype=object), "rx_position": np.array([])}
+        return {
+            "rx": np.array([], dtype=object),
+            LOOKUP_GEO[0]: np.array([]),
+            LOOKUP_GEO[1]: np.array([]),
+            LOOKUP_GEO[2]: np.array([]),
+        }
 
-    rx_names = np.concatenate([lk["rx_name"] for lk in lookups])
-    rx_positions = np.concatenate([lk["rx_position"] for lk in lookups])
-    return {"rx_name": rx_names, "rx_position": rx_positions}
+    result = {"rx": np.concatenate([lk["rx"] for lk in lookups])}
+    if np.isscalar(lookups[0][LOOKUP_GEO[0]]):
+        for g in LOOKUP_GEO:
+            result[g] = np.array([lk[g] for lk in lookups])
+    else:
+        for g in LOOKUP_GEO:
+            result[g] = np.concatenate([lk[g] for lk in lookups])
+    return result
 
 
 def _apply_tec_filtering_df(df: pd.DataFrame, q_thresh: float) -> pd.DataFrame:
@@ -467,154 +491,74 @@ def load_observations(
     lookups = [result[1] for result in results]
 
     combined_obs = _concat_obs_arrays(obs_dicts)
-    df = pd.DataFrame(combined_obs)
-    df = df.sort_values("time").reset_index(drop=True)
+    obs = pd.DataFrame(combined_obs)
+    obs = obs.sort_values("time").reset_index(drop=True)
 
-    lookup = _concat_lookups(lookups)
-    df = _apply_tec_filtering_df(df, q_thresh)
+    rx = _concat_lookups(lookups)
+    rx = pd.DataFrame(rx)
+    obs = _apply_tec_filtering_df(obs, q_thresh)
 
-    return df, lookup
+    return obs, rx
 
 
-def _extract_times(source) -> np.ndarray:
-    """Extract unique time values from various input types.
-
-    Args:
-        source: pd.DataFrame, xr.Dataset, xr.DataArray, or array-like with time values
-
-    Returns:
-        Sorted array of unique time values
-
-    Raises:
-        ValueError: If source is xr.Dataset without time variable
-    """
-    if isinstance(source, pd.DataFrame):
-        if "time" not in source.columns:
+def make_time_windows(
+    times: pd.DataFrame | np.ndarray,
+    window: int,
+    step: int,
+    drop_incomplete: bool = True,
+) -> list[TimeWindow]:
+    if isinstance(times, pd.DataFrame):
+        if "time" not in times.columns:
             raise ValueError("dataframe does not contain a time column")
-        return np.unique(np.asarray(source["time"].values))
-    if isinstance(source, xr.Dataset):
-        if "time" not in source:
-            raise ValueError("dataset does not contain a time variable")
-        return np.unique(np.asarray(source["time"].values))
-    if isinstance(source, xr.DataArray):
-        return np.unique(np.asarray(source.values))
-    return np.unique(np.asarray(source))
-
-
-def get_time_slices(data_or_times, window: int, step: int, drop_incomplete: bool = True):
-    """Generate time window slices for processing.
-
-    Args:
-        data_or_times: Dataset, DataArray, or array with time values
-        window: Number of time points per window
-        step: Step size between windows
-        drop_incomplete: Whether to drop incomplete final windows
-
-    Returns:
-        Tuple of (list of slice objects, list of start times)
-
-    Raises:
-        ValueError: If window or step is not positive
-    """
-    times = _extract_times(data_or_times)
-    n_times = times.shape[0]
-    if window <= 0:
-        raise ValueError("window must be positive")
-    if step <= 0:
-        raise ValueError("step must be positive")
-    if n_times == 0:
-        return [], []
-
-    slices = []
-    slice_times = []
+        time_values = np.asarray(times["time"])
+    else:
+        time_values = np.asarray(times)
+    unique_times, inverse = np.unique(time_values, return_inverse=True)
+    n_unique = len(unique_times)
+    if n_unique == 0:
+        return []
+    sorted_idx = np.argsort(inverse)
+    _, group_sizes = np.unique(inverse, return_counts=True)
+    split_pts = np.cumsum(group_sizes)[:-1]
+    time_to_indices = dict(
+        zip(unique_times, np.split(sorted_idx, split_pts), strict=True)
+    )
+    if window <= 0 or step <= 0:
+        return []
+    windows: list[TimeWindow] = []
     start = 0
-    while start < n_times:
+    while start < n_unique:
         stop = start + window
-        if stop <= n_times:
-            slices.append(slice(start, stop))
-            slice_times.append(times[start])
+        if stop <= n_unique:
+            wtimes = unique_times[start:stop]
+            row_idx = np.concatenate([time_to_indices[t] for t in wtimes])
+            windows.append(TimeWindow(wtimes[0], wtimes[-1], row_idx))
         elif not drop_incomplete:
-            slices.append(slice(start, n_times))
-            slice_times.append(times[start])
+            wtimes = unique_times[start:]
+            row_idx = np.concatenate([time_to_indices[t] for t in wtimes])
+            windows.append(TimeWindow(wtimes[0], wtimes[-1], row_idx))
             break
         else:
             break
         start += step
+    return windows
 
-    return slices, slice_times
 
-
-def _get_lookup_value(
-    data: pd.DataFrame | xr.Dataset, rx_values: np.ndarray
-) -> np.ndarray:
+def lookup_rx_location(obs: pd.DataFrame, rx: pd.DataFrame) -> np.ndarray:
     """Get receiver positions for given receiver names.
 
     Args:
-        data: DataFrame with rx_lookup in attrs, or xr.Dataset with rx_position lookup
-        rx_values: Array of receiver names
+        obs: DataFrame with rx column
+        rx: Array of receiver names
 
     Returns:
         Array of receiver positions (lat, lon, alt)
     """
-    if isinstance(data, pd.DataFrame):
-        lookup = data.attrs.get("rx_lookup")
-        if lookup is None:
-            raise ValueError("dataframe does not contain rx_lookup attribute")
-        rx_names = lookup["rx_name"]
-        rx_positions = lookup["rx_position"]
-        pos_dict = {
-            str(name): pos for name, pos in zip(rx_names, rx_positions, strict=True)
-        }
-        result = np.array(
-            [
-                pos_dict.get(str(rx), np.array([np.nan, np.nan, np.nan]))
-                for rx in rx_values
-            ]
-        )
-        return result
-    else:
-        lookup = data["rx_position"].sel(
-            {
-                RX_LOOKUP_DIM: xr.DataArray(
-                    np.asarray(rx_values, dtype=object), dims=OBS_DIM
-                )
-            }
-        )
-        return np.asarray(lookup.values, dtype=float)
+    result = pd.merge(obs, rx, on="rx", how="left")
+    return result.loc[:, ["rx", *LOOKUP_GEO]]
 
 
-def collect_time_window(
-    data: pd.DataFrame, time_slice: slice
-) -> tuple[pd.DataFrame, np.ndarray]:
-    """Extract observation DataFrame for a time slice.
-
-    Args:
-        data: DataFrame with observation data
-        time_slice: Slice selecting time points
-
-    Returns:
-        Tuple of (DataFrame with observations, selected time values)
-
-    Raises:
-        ValueError: If dataframe missing time column
-    """
-    if "time" not in data.columns:
-        raise ValueError("dataframe does not contain a time column")
-
-    unique_times = np.unique(np.asarray(data["time"].values))
-    selected_times = unique_times[time_slice]
-    if selected_times.size == 0:
-        return pd.DataFrame(), selected_times
-
-    mask = np.isin(np.asarray(data["time"].values), selected_times)
-    if not np.any(mask):
-        return pd.DataFrame(), selected_times
-
-    df = data.loc[mask].copy()
-    return df, selected_times
-
-
-def aggregate_by_receiver_satellite(df: pd.DataFrame) -> pd.DataFrame | None:
+def aggregate_by_receiver_satellite(obs: pd.DataFrame) -> pd.DataFrame | None:
     """Aggregate observations by receiver-satellite pair using mean reduction.
 
     Args:
@@ -624,7 +568,7 @@ def aggregate_by_receiver_satellite(df: pd.DataFrame) -> pd.DataFrame | None:
         Aggregated DataFrame with rx and sv as grouping keys, or None if empty
     """
     grouped = (
-        df.drop(columns=["time"], errors="ignore")
+        obs.drop(columns=["time"], errors="ignore")
         .groupby(["rx", "sv"], as_index=False)
         .mean(numeric_only=True)
     )
@@ -634,7 +578,7 @@ def aggregate_by_receiver_satellite(df: pd.DataFrame) -> pd.DataFrame | None:
 
 
 def project_to_ipp(
-    grouped: pd.DataFrame,
+    obs: pd.DataFrame,
     rx_positions: np.ndarray,
     h: float,
 ) -> pd.DataFrame:
@@ -649,12 +593,12 @@ def project_to_ipp(
         DataFrame with added lat, lon columns
     """
     lat, lon = aer2ipp(
-        grouped["az"].to_numpy(),
-        grouped["el"].to_numpy(),
+        obs["az"].to_numpy(),
+        obs["el"].to_numpy(),
         rx_positions,
         h,
     )
-    return grouped.assign(lat=lat, lon=lon)
+    return obs.assign(lat=lat, lon=lon)
 
 
 def convert_to_local_coords(
@@ -684,45 +628,62 @@ def convert_to_local_coords(
     return grouped.assign(x=x, y=y)
 
 
+def get_obs_in_window(
+    obs: pd.DataFrame, time_spec: tuple[np.datetime64, np.datetime64] | TimeWindow
+):
+    if isinstance(time_spec, TimeWindow):
+        df = obs.iloc[time_spec.row_indices].copy()
+    elif isinstance(time_spec, tuple):
+        start_time, end_time = time_spec
+        mask = (obs["time"] >= start_time) & (obs["time"] <= end_time)
+        df = obs.loc[mask].copy()
+    else:
+        raise TypeError(
+            f"get_data() time_spec must be a tuple (start_time, end_time) or TimeWindow, "
+            f"not {type(time_spec).__name__}"
+        )
+    LOGGER.info("points in time range: %s", len(df))
+    if df.empty:
+        return
+    return df
+
+
 def get_data(
-    data: pd.DataFrame,
-    time_slice: slice,
+    obs: pd.DataFrame,
+    rx: pd.DataFrame,
+    time_spec: tuple[np.datetime64, np.datetime64] | TimeWindow,
     h: float,
     lat_limits: list | None = None,
     lon_limits: list | None = None,
     use_local_cs: bool = True,
 ) -> pd.DataFrame | None:
-    df, selected_times = collect_time_window(data, time_slice)
-    if df.empty or selected_times.size == 0:
-        return None
+    df = get_obs_in_window(obs, time_spec)
+    if df is None:
+        return
+    df = aggregate_by_receiver_satellite(df)
+    if df is None:
+        return
 
-    LOGGER.info("points in time range: %s", len(df))
-    LOGGER.info("time range: %s, %s", selected_times[0], selected_times[-1])
-
-    grouped = aggregate_by_receiver_satellite(df)
-    if grouped is None:
-        return None
-
-    rx_positions = _get_lookup_value(data, grouped["rx"].to_numpy())
-    grouped = project_to_ipp(grouped, rx_positions, h)
+    rx_positions = lookup_rx_location(df, rx)
+    df = project_to_ipp(df, rx_positions.loc[:, LOOKUP_GEO].values, h)
 
     if not (lat_limits is None and lon_limits is None):
         valid_lat = (
-            (grouped["lat"] > lat_limits[0]) & (grouped["lat"] < lat_limits[1])
+            (df["lat"] > lat_limits[0]) & (df["lat"] < lat_limits[1])
             if lat_limits
-            else np.ones(grouped.shape[0], bool)
+            else np.ones(df.shape[0], bool)
         )
         valid_lon = (
-            (grouped["lon"] > lon_limits[0]) & (grouped["lon"] < lon_limits[1])
+            (df["lon"] > lon_limits[0]) & (df["lon"] < lon_limits[1])
             if lon_limits
-            else np.ones(grouped.shape[0], bool)
+            else np.ones(df.shape[0], bool)
         )
-        grouped = grouped.loc[valid_lat & valid_lon]
-    if grouped.empty:
-        LOGGER.warning("empty lat data: %s", time_slice)
+        df = df.loc[valid_lat & valid_lon]
+    if df.empty:
+        LOGGER.warning("empty lat data: %s", time_spec)
         return None
 
     if use_local_cs:
-        grouped = convert_to_local_coords(grouped, lat_limits, lon_limits, h)
+        df = convert_to_local_coords(df, lat_limits, lon_limits, h)
 
-    return grouped
+    return df

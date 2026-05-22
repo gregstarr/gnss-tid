@@ -171,4 +171,4 @@ hydralance/
 .ruff_cache/
 .codex
 .claude
-# openspec
+openspec
