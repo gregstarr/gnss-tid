@@ -11,11 +11,9 @@ import xarray
 from joblib import Parallel, delayed
 from matplotlib import pyplot as plt
 from scipy.fft import fft2, fftfreq
-from scipy.signal.windows import kaiser
 from tqdm_joblib import tqdm_joblib
 
 from .center_finding import find_center
-from .image import ImageMaker as ImageMakerBase
 from .plotting import plot_center_finder
 from .pointdata import get_data, make_time_windows
 
@@ -38,89 +36,38 @@ def cleanup_worker_logger(worker_logger, handler):
     worker_logger.removeHandler(handler)
 
 
-def run_center_finder(
+def initialize_image_maker(
     obs: Any,
     rx: Any,
-    F: xarray.Dataset,
-    ts: slice,
-    lat_limits: tuple[float, float],
-    lon_limits: tuple[float, float],
-    center_finder: Callable,
-    tec_name: str,
-) -> Any:
-    """
-    Perform center finding for a specific spectral patch.
-
-    Args:
-        obs: Observation data.
-        rx: Receiver data.
-        F: Spectral dataset containing the patch to analyze.
-        ts: Time slice.
-        lat_limits: Latitude limits for data retrieval.
-        lon_limits: Longitude limits for data retrieval.
-        center_finder: Callable to perform the center finding optimization.
-        tec_name: Name of the TEC variable in the data.
-
-    Returns:
-        The result of the center finder optimization.
-    """
-    X, Y = np.meshgrid(F.px.values, F.py.values)
-    pts = np.column_stack([X.ravel(), Y.ravel()])
-    weights = F.F.values.ravel()
-    vectors = np.column_stack((F.Fx.values.ravel(), F.Fy.values.ravel()))
-    k = np.hypot(vectors[:, 0], vectors[:, 1])
-    c0 = find_center(pts, vectors, weights)
-    w0 = 1 / k.max()
-
-    data = get_data(obs, rx, ts, F.height.values, lat_limits, lon_limits)
-    result = center_finder(
-        c0, w0, data["x"].values, data["y"].values, data[tec_name].values
-    )
-    return result
-
-
-def run_block_spectral_focusing(
-    obs: Any,
-    rx: Any,
-    window: int,
+    window_size: int,
     step: int,
     image_maker: Any,
-    center_finder: Callable,
     heights: np.ndarray,
-    block_shape: tuple[int, int],
-    block_step: int,
-    window_func: xarray.DataArray,
-    logscale_objective: bool,
-    n_jobs: int,
-    tec_name: str,
     lat_limits: tuple[float, float],
     lon_limits: tuple[float, float],
-) -> xarray.Dataset:
-    """
-    Orchestrate the block spectral focusing pipeline.
+    n_jobs: int,
+) -> None:
+    """Find the time window with the most data points and call image_maker.initialize().
+
+    Iterates over all time windows and measures how many data points are available
+    at the median height.  The window with the most points is used to initialize
+    the image maker's interpolation grid.
 
     Args:
-        obs: Observation data.
-        rx: Receiver data.
-        window: Time window size.
-        step: Time window step.
-        image_maker: Image maker object.
-        center_finder: Center finder callable.
-        heights: Array of heights to process.
-        block_shape: Shape of the FFT blocks.
-        block_step: Stride for block construction.
-        window_func: Windowing function.
-        logscale_objective: Whether to use log scale for the objective.
-        n_jobs: Number of parallel jobs.
-        tec_name: Name of the TEC variable.
-        lat_limits: Latitude limits.
-        lon_limits: Longitude limits.
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        window_size: Number of time steps per window.
+        step: Stride between consecutive windows.
+        image_maker: Image maker object whose ``initialize`` method will be called.
+        heights: Array of heights to consider; the median height is used for sizing.
+        lat_limits: ``(min_lat, max_lat)`` bounds for data retrieval.
+        lon_limits: ``(min_lon, max_lon)`` bounds for data retrieval.
+        n_jobs: Number of parallel jobs to use when counting window sizes.
 
     Returns:
-        The final dataset containing focused spectral parameters.
+        None.  ``image_maker.initialize`` is called as a side effect.
     """
-    # Initialize image maker
-    time_windows = make_time_windows(obs["time"], window, step)
+    time_windows = make_time_windows(obs["time"], window_size, step)
     mid_height = heights[len(heights) // 2]
     logger.info("running initializer")
 
@@ -147,196 +94,29 @@ def run_block_spectral_focusing(
     init_data = get_data(obs, rx, time_windows[ii], mid_height, lat_limits, lon_limits)
     image_maker.initialize(init_data["x"].values, init_data["y"].values)
 
-    logger.info("running BlockSpectralFocusing n_jobs=%d", n_jobs)
-    Path("plots").mkdir(exist_ok=True)
-    times = [w.start_time for w in time_windows]
-
-    q = Manager().Queue()
-    root_logger = logging.getLogger()
-    listener = QueueListener(q, *root_logger.handlers)
-
-    try:
-        listener.start()
-        with Parallel(n_jobs=n_jobs) as parallel:
-            results = parallel(
-                delayed(run_spectral_time_slice)(
-                    obs,
-                    rx,
-                    ts,
-                    time,
-                    q,
-                    heights,
-                    lat_limits,
-                    lon_limits,
-                    image_maker,
-                    tec_name,
-                    block_shape,
-                    block_step,
-                    window_func,
-                    logscale_objective,
-                    center_finder,
-                )
-                for ts, time in zip(time_windows, times, strict=True)
-            )
-    finally:
-        listener.stop()
-
-    logger.info("time steps finished")
-    coord_center = (np.mean(lat_limits), np.mean(lon_limits))
-    data = (
-        xarray.concat(filter(lambda x: x is not None, results), dim="time")
-        .reindex(time=times)
-        .assign_attrs(coord_center=coord_center)
-    )
-    return data
-
-
-def run_smoothed_patch_spectral(
-    obs,
-    rx,
-    window,
-    step,
-    image_maker,
-    center_finder,
-    heights,
-    block_shape,
-    block_step,
-    window_func,
-    logscale_objective,
-    n_jobs,
-    tec_name,
-    lat_limits,
-    lon_limits,
-    time_window,
-    density_thresh,
-):
-    slices = make_time_windows(obs["time"], window, step)
-    times = [w.start_time for w in slices]
-
-    q = Manager().Queue()
-    root_logger = logging.getLogger()
-    listener = QueueListener(q, *root_logger.handlers)
-
-    try:
-        listener.start()
-        with Parallel(n_jobs=n_jobs) as parallel:
-            objectives = parallel(
-                delayed(run_spectral_time_slice)(
-                    obs,
-                    rx,
-                    ts,
-                    time,
-                    q,
-                    heights,
-                    lat_limits,
-                    lon_limits,
-                    image_maker,
-                    tec_name,
-                    block_shape,
-                    block_step,
-                    window_func,
-                    logscale_objective,
-                    None,  # center_finder = None to get objective
-                )
-                for ts, time in zip(slices, times, strict=True)
-            )
-    finally:
-        listener.stop()
-
-    # objectives is a list of DataArrays (each with dim 'height')
-    obj_data = xarray.concat(objectives, dim="time").reindex(time=times)
-
-    # Smoothing logic
-    if logscale_objective:
-        smoothed = obj_data.rolling(time=time_window, center=True, min_periods=1).mean()
-    else:
-        smoothed = np.exp(
-            np.log(obj_data).rolling(time=time_window, center=True, min_periods=1).mean()
-        )
-
-    smooth_nonull = smoothed.dropna(dim="time")
-    focus_height = smooth_nonull.isel(height=smooth_nonull.argmax(dim="height")).reindex(
-        time=smoothed.time
-    )
-
-    # Plots
-    Path("plots").mkdir(exist_ok=True)
-    fig, ax = plt.subplots(figsize=(5, 6), tight_layout=True)
-    smoothed.plot(ax=ax)
-    ax.plot(focus_height.height, focus_height.time, "r.-")
-    fig.savefig("plots/objective.png")
-    plt.close(fig)
-
-    # Second pass: collect focused data
-    images = []
-    for ii, (ts, time) in enumerate(zip(slices, times, strict=True)):
-        logger.info("collecting focused data %d / %d", ii + 1, len(slices))
-        height = focus_height.isel(time=ii).height.item()
-        data = get_data(obs, rx, ts, height, lat_limits, lon_limits)
-        if data is None:
-            continue
-        img = image_maker(data["x"].values, data["y"].values, data[tec_name].values)
-        p = get_fft_patches(
-            img.image,
-            block_shape,
-            image_maker.hres,
-            block_step,
-            window_func,
-            logscale_objective,
-        )
-        img = img.assign(patch=p).expand_dims(time=[time])
-        images.append(img)
-
-    data_focused = xarray.concat(images, "time")
-    data_focused = (
-        data_focused.merge(process_patches(data_focused))
-        .reindex(time=focus_height.time)
-        .assign(height=focus_height.height)
-    )
-
-    # Sparse image for center finder
-    sparse_img = (
-        data_focused.image.where(data_focused.density > density_thresh)
-        .stack(row=("x", "y"))
-        .reset_index("row")
-        .dropna(dim="time", how="all")
-        .dropna(dim="row", how="all")
-        .reset_coords()
-    )
-
-    # Find center
-    # We need a standalone version of SmoothedPatchSpectral.run_center_finder
-    # Let's define it below or above.
-    params = run_smoothed_center_finder(data_focused, sparse_img, center_finder)
-
-    logger.info("params fit in %d iterations", len(params["history"]["metric"]))
-    data_focused = data_focused.assign(
-        center=("ci", params["center"]),
-        wavelength=xarray.DataArray(
-            params["wavelength"], coords={"time": sparse_img.time}
-        ),
-        offset=xarray.DataArray(params["offset"], coords={"time": sparse_img.time}),
-        phase=xarray.DataArray(params["phase"], coords={"time": sparse_img.time}),
-    ).assign_attrs(coord_center=(np.mean(lat_limits), np.mean(lon_limits)))
-
-    return data_focused
-
 
 def run_smoothed_center_finder(
     data: xarray.Dataset,
     sparse_img: xarray.Dataset,
     center_finder: Callable,
 ) -> Any:
-    """
-    Perform center finding for a smoothed spectral dataset.
+    """Perform global center finding over a focused spectral dataset.
+
+    Uses the time step with the highest objective to construct an initial guess
+    for the source center and wavenumber, then calls ``center_finder`` on the
+    full sparse image stack.
 
     Args:
-        data: The focused spectral dataset.
-        sparse_img: A sparse representation of the image for optimization.
-        center_finder: Callable to perform the center finding optimization.
+        data: Focused spectral dataset with variables ``objective``, ``px``,
+            ``py``, ``F``, ``Fx``, ``Fy``.
+        sparse_img: Sparse representation of the image stack for optimization,
+            with variables ``x``, ``y``, ``image``.
+        center_finder: Callable that accepts
+            ``(c0, w0, x, y, image)`` and returns a parameter dict with keys
+            ``center``, ``wavelength``, ``offset``, ``phase``, ``history``.
 
     Returns:
-        The result of the center finder optimization.
+        The result dict returned by ``center_finder``.
     """
     logger.info("finding center")
     d = data.isel(time=data.objective.argmax())
@@ -362,7 +142,7 @@ def run_smoothed_center_finder(
 def run_spectral_time_slice(
     obs: Any,
     rx: Any,
-    ts: slice,
+    ts: Any,
     time: Any,
     log_queue: Any | None = None,
     heights: np.ndarray | None = None,
@@ -374,32 +154,33 @@ def run_spectral_time_slice(
     block_step: int | None = None,
     window: xarray.DataArray | None = None,
     logscale_objective: bool | None = None,
-    center_finder: Callable | None = None,
-    return_data: bool = False,
-) -> xarray.Dataset | xarray.DataArray | None:
-    """
-    Process a single time slice through the spectral focusing pipeline.
+) -> xarray.DataArray | None:
+    """Process a single time slice and return per-height FFT objectives.
+
+    Retrieves data for each height, builds images, computes FFT patches, and
+    returns the objective value at each height.  Used as the first-pass worker
+    in :func:`run_spectral_focusing`.
 
     Args:
-        obs: Observation data.
-        rx: Receiver data.
-        ts: Time slice.
-        time: Start time of the slice.
-        log_queue: Queue for worker logging.
-        heights: Array of heights to process.
-        lat_limits: Latitude limits.
-        lon_limits: Longitude limits.
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        time: Start timestamp of this window; used as the ``time`` coordinate.
+        log_queue: Optional multiprocessing queue for worker logging.
+        heights: Array of heights (km) to evaluate.
+        lat_limits: ``(min_lat, max_lat)`` bounds.
+        lon_limits: ``(min_lon, max_lon)`` bounds.
         image_maker: Image maker object.
-        tec_name: Name of the TEC variable.
-        block_shape: Shape of the FFT blocks.
-        block_step: Stride for FFT block construction.
-        window: Windowing function.
-        logscale_objective: Whether to use log scale for the objective.
-        center_finder: Center finder callable.
-        return_data: If True, returns the full dataset instead of just the objective.
+        tec_name: Name of the TEC variable in the observation data.
+        block_shape: ``(ny, nx)`` shape of each FFT block.
+        block_step: Stride used when extracting rolling blocks.
+        window: FFT windowing array of shape ``(1, 1, ny, nx)``.
+        logscale_objective: If ``True``, the patch power is log10-transformed
+            before selecting the peak.
 
     Returns:
-        The processed data for the time slice, or None if processing failed.
+        A ``DataArray`` of objective values with dims ``(time, height)``,
+        or ``None`` if data retrieval failed for any height.
     """
     wlog, handler = configure_worker_logger(log_queue)
     try:
@@ -422,45 +203,433 @@ def run_spectral_time_slice(
         )
         if data is None:
             return None
-        wlog.info("[%03d-%03d]: processing patches", ts.start, ts.stop)
-
         patches = process_patches(data).expand_dims(time=[time])
-
-        if return_data:
-            return data.merge(patches)
-
-        if center_finder is None:
-            return patches.objective
-
-        # BlockSpectralFocusing logic
-        full_data = data.merge(patches.squeeze("time"))
-        best_height_idx = full_data.objective.argmax()
-        output = (
-            full_data.isel(height=best_height_idx).expand_dims(time=[time]).reset_coords()
-        )
-
-        wlog.info("[%03d-%03d]: finding params", ts.start, ts.stop)
-        params = run_center_finder(
-            obs, rx, output, ts, lat_limits, lon_limits, center_finder, tec_name
-        )
-
-        output = output.assign(
-            cx=(["time"], [params["center"][0]]),
-            cy=(["time"], [params["center"][1]]),
-            wavelength=(["time"], [params["wavelength"]]),
-            offset=(["time"], [params["offset"]]),
-        )
-
-        wlog.info(
-            "[%03d-%03d]: params fit in %d iterations",
-            ts.start,
-            ts.stop,
-            len(params["history"]["metric"]),
-        )
-        wlog.info("[%03d-%03d]: SUCCESS", ts.start, ts.stop)
-        return output
+        return patches.objective
     finally:
         cleanup_worker_logger(wlog, handler)
+
+
+def _process_single_slice(
+    obs: Any,
+    rx: Any,
+    ts: Any,
+    time: Any,
+    heights: np.ndarray,
+    image_maker: Any,
+    tec_name: str,
+    block_shape: tuple[int, int],
+    block_step: int,
+    window: np.ndarray,
+    logscale_objective: bool,
+    lat_limits: tuple[float, float],
+    lon_limits: tuple[float, float],
+    log_queue: Any | None = None,
+) -> tuple[xarray.Dataset, xarray.DataArray] | None:
+    """Process a single time slice across all heights and return data at the best height.
+
+    Computes images and FFT patches at every candidate height in a single pass,
+    selects the height with the maximum objective, and returns both the full
+    image/patch data at that height and the per-height objective surface.  Used
+    as the single-pass worker in :func:`run_spectral_focusing` when
+    ``time_window=1``.
+
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        time: Start timestamp of this window; used as the ``time`` coordinate.
+        heights: Array of IPP heights (km) to evaluate.
+        image_maker: Image maker object.
+        tec_name: Name of the TEC variable in the observation data.
+        block_shape: ``(ny, nx)`` shape of each FFT block.
+        block_step: Stride used when extracting rolling blocks.
+        window: FFT windowing array of shape ``(1, 1, ny, nx)``.
+        logscale_objective: If ``True``, the patch power is log10-transformed.
+        lat_limits: ``(min_lat, max_lat)`` bounds.
+        lon_limits: ``(min_lon, max_lon)`` bounds.
+        log_queue: Optional multiprocessing queue for worker logging.
+
+    Returns:
+        A 2-tuple ``(best_slice, objectives)`` where:
+
+        - ``best_slice`` is a ``Dataset`` with variables ``image``, ``density``,
+          ``patch``, and ``height``, expanded along a ``time`` dimension.
+        - ``objectives`` is a ``DataArray`` of per-height objective values with
+          dims ``(time, height)``.
+
+        Returns ``None`` if data retrieval failed for any height.
+    """
+    wlog, handler = configure_worker_logger(log_queue)
+    try:
+        wlog.info("[%03d-%03d]: single-pass slice", ts.start, ts.stop)
+        data_all = process_heights(
+            obs,
+            rx,
+            ts,
+            heights,
+            lat_limits,
+            lon_limits,
+            image_maker,
+            tec_name,
+            block_shape,
+            image_maker.hres,
+            block_step,
+            window,
+            logscale_objective,
+            wlog=wlog,
+        )
+        if data_all is None:
+            return None
+        objectives = process_patches(data_all).objective
+        best_idx = int(objectives.argmax())
+        best_height = float(heights[best_idx])
+        result = data_all.isel(height=best_idx).drop_vars("height")
+        best_slice = result.expand_dims(time=[time]).assign(
+            height=("time", [best_height])
+        )
+        obj_da = objectives.expand_dims(time=[time])
+        return best_slice, obj_da
+    finally:
+        cleanup_worker_logger(wlog, handler)
+
+
+def _process_focused_slice(
+    obs: Any,
+    rx: Any,
+    ts: Any,
+    time: Any,
+    height: float,
+    image_maker: Any,
+    tec_name: str,
+    block_shape: tuple[int, int],
+    block_step: int,
+    window: np.ndarray,
+    logscale_objective: bool,
+    lat_limits: tuple[float, float],
+    lon_limits: tuple[float, float],
+    log_queue: Any | None = None,
+) -> xarray.Dataset | None:
+    """Process a single time slice at a fixed height for the focused second pass.
+
+    Retrieves data at the specified height, builds an image, and computes the
+    FFT patches.  Used as the second-pass worker in :func:`run_spectral_focusing`.
+
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        time: Start timestamp of this window; used as the ``time`` coordinate.
+        height: IPP height (km) at which to evaluate this time slice.
+        image_maker: Image maker object.
+        tec_name: Name of the TEC variable in the observation data.
+        block_shape: ``(ny, nx)`` shape of each FFT block.
+        block_step: Stride used when extracting rolling blocks.
+        window: FFT windowing array of shape ``(1, 1, ny, nx)``.
+        logscale_objective: If ``True``, the patch power is log10-transformed.
+        lat_limits: ``(min_lat, max_lat)`` bounds.
+        lon_limits: ``(min_lon, max_lon)`` bounds.
+        log_queue: Optional multiprocessing queue for worker logging.
+
+    Returns:
+        A ``Dataset`` with variables ``image`` and ``patch``, expanded along
+        a ``time`` dimension, or ``None`` if data retrieval failed.
+    """
+    wlog, handler = configure_worker_logger(log_queue)
+    try:
+        wlog.info("focused slice time=%s height=%.1f", time, height)
+        data = get_data(obs, rx, ts, height, lat_limits, lon_limits)
+        if data is None:
+            return None
+        img = image_maker(data["x"].values, data["y"].values, data[tec_name].values)
+        p = get_fft_patches(
+            img.image,
+            block_shape,
+            image_maker.hres,
+            block_step,
+            window,
+            logscale_objective,
+        )
+        return img.assign(patch=p).expand_dims(time=[time])
+    finally:
+        cleanup_worker_logger(wlog, handler)
+
+
+def run_spectral_focusing(
+    obs: Any,
+    rx: Any,
+    window_size: int,
+    step: int,
+    image_maker: Any,
+    center_finder: Callable,
+    heights: np.ndarray,
+    block_shape: tuple[int, int],
+    block_step: int,
+    window: np.ndarray,
+    logscale_objective: bool,
+    n_jobs: int,
+    tec_name: str,
+    lat_limits: tuple[float, float],
+    lon_limits: tuple[float, float],
+    time_window: int = 1,
+    density_thresh: int = 20,
+) -> xarray.Dataset:
+    """Unified spectral focusing pipeline.
+
+    Orchestrates spectral focusing over a sequence of time windows in two modes
+    depending on ``time_window``:
+
+    **Single-pass** (``time_window=1``):
+
+    1. **Init**: find the time window with the most data and initialize the
+       image maker's interpolation grid.
+    2. **Single pass**: for each time window, compute images and FFT-patch
+       objectives at all candidate heights, then immediately select the height
+       with the highest objective.  No smoothing is applied.
+
+    **Two-pass** (``time_window>1``):
+
+    1. **Init**: same as above.
+    2. **First pass**: for each time window compute only the per-height FFT
+       objectives (images are discarded to save memory).
+    3. **Height smoothing**: apply a rolling geometric mean over time to the
+       full objective surface before selecting heights.
+    4. **Second pass**: for each time window reconstruct the image and FFT
+       patches at the smoothed focus height.
+
+    Both modes finish with a global center-finding step that fits source
+    parameters jointly across all times.
+
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        window_size: Number of unique time steps per sliding window.
+        step: Stride (in time steps) between consecutive windows.
+        image_maker: Image maker object; ``initialize`` will be called before
+            processing begins.
+        center_finder: Callable ``(c0, w0, x, y, image) -> dict`` used for
+            global source-parameter estimation.
+        heights: Array of IPP heights (km) to search.
+        block_shape: ``(ny, nx)`` shape of each FFT block.
+        block_step: Stride used when extracting rolling blocks.
+        window: FFT windowing array of shape ``(1, 1, ny, nx)``.
+        logscale_objective: If ``True``, patch power is log10-transformed
+            before selecting the spectral peak.  When ``False`` and
+            ``time_window>1``, the geometric mean is computed as
+            ``exp(mean(log(L)))``.
+        n_jobs: Number of parallel worker processes.
+        tec_name: Name of the TEC variable in the observation data.
+        lat_limits: ``(min_lat, max_lat)`` bounds for data retrieval.
+        lon_limits: ``(min_lon, max_lon)`` bounds for data retrieval.
+        time_window: Rolling-mean window length (in time steps) applied to the
+            height-objective surface.  ``1`` disables smoothing (single-pass
+            mode).  Default ``1``.
+        density_thresh: Minimum image density (data points per pixel) required
+            for a pixel to be included in the sparse image used for center
+            finding.  Default ``20``.
+
+    Returns:
+        An ``xarray.Dataset`` with dimensions ``(time,)`` and variables:
+
+        - ``image`` ``(time, x, y)``: gridded TEC image at the focus height.
+        - ``patch`` ``(time, px, py, kx, ky)``: FFT patch at the spectral peak.
+        - ``F``, ``Fx``, ``Fy`` ``(time, px, py)``: peak power and wavenumbers.
+        - ``objective`` ``(time,)``: summed peak power used for height selection.
+        - ``height`` ``(time,)``: focus height (km).
+        - ``center`` ``(ci,)``: estimated source center ``[x, y]`` (km, global).
+        - ``wavelength`` ``(time,)``: estimated horizontal wavelength (km).
+        - ``offset`` ``(time,)``: estimated DC offset.
+        - ``phase`` ``(time,)``: estimated wave phase (rad).
+
+        Attributes include ``coord_center`` as ``(mean_lat, mean_lon)``.
+    """
+    # --- Step 1: initialise image maker ---------------------------------------
+    initialize_image_maker(
+        obs, rx, window_size, step, image_maker, heights, lat_limits, lon_limits, n_jobs
+    )
+
+    time_windows = make_time_windows(obs["time"], window_size, step)
+    times = [w.start_time for w in time_windows]
+    Path("plots").mkdir(exist_ok=True)
+    root_logger = logging.getLogger()
+
+    if time_window == 1:
+        # --- Single-pass: process all heights and select best per time slice --
+        logger.info(
+            "run_spectral_focusing: single pass (no smoothing), n_jobs=%d", n_jobs
+        )
+        q = Manager().Queue()
+        listener = QueueListener(q, *root_logger.handlers)
+        try:
+            listener.start()
+            with Parallel(n_jobs=n_jobs) as parallel:
+                single_slices = parallel(
+                    delayed(_process_single_slice)(
+                        obs,
+                        rx,
+                        ts,
+                        time,
+                        heights,
+                        image_maker,
+                        tec_name,
+                        block_shape,
+                        block_step,
+                        window,
+                        logscale_objective,
+                        lat_limits,
+                        lon_limits,
+                        q,
+                    )
+                    for ts, time in zip(time_windows, times, strict=True)
+                )
+        finally:
+            listener.stop()
+
+        valid_results = [r for r in single_slices if r is not None]
+        if not valid_results:
+            raise RuntimeError("single pass produced no valid slices")
+
+        valid_slices, per_height_objs = zip(*valid_results, strict=True)
+        data_focused = xarray.concat(valid_slices, "time")
+        data_focused = data_focused.merge(process_patches(data_focused)).reindex(
+            time=times
+        )
+
+        # Plot the height-objective surface with the selected height overlaid,
+        # matching the two-pass diagnostic plot layout
+        obj_surface = xarray.concat(per_height_objs, dim="time").reindex(time=times)
+        fig, ax = plt.subplots(figsize=(5, 6), tight_layout=True)
+        obj_surface.plot(ax=ax)
+        ax.plot(data_focused.height, data_focused.time, "r.-")
+        fig.savefig("plots/objective.png")
+        plt.close(fig)
+
+    else:
+        # --- Two-pass: first collect all objectives, smooth, then reconstruct -
+        # First pass — objectives only (images discarded to save memory)
+        logger.info("run_spectral_focusing: first pass (objectives), n_jobs=%d", n_jobs)
+        q = Manager().Queue()
+        listener = QueueListener(q, *root_logger.handlers)
+        try:
+            listener.start()
+            with Parallel(n_jobs=n_jobs) as parallel:
+                objectives = parallel(
+                    delayed(run_spectral_time_slice)(
+                        obs,
+                        rx,
+                        ts,
+                        time,
+                        q,
+                        heights,
+                        lat_limits,
+                        lon_limits,
+                        image_maker,
+                        tec_name,
+                        block_shape,
+                        block_step,
+                        window,
+                        logscale_objective,
+                    )
+                    for ts, time in zip(time_windows, times, strict=True)
+                )
+        finally:
+            listener.stop()
+
+        obj_data = xarray.concat(
+            filter(lambda x: x is not None, objectives), dim="time"
+        ).reindex(time=times)
+
+        # Height smoothing — arithmetic mean on the objective surface (log or linear
+        # scale is controlled by logscale_objective at the FFT stage)
+        smoothed = obj_data.rolling(time=time_window, center=True, min_periods=1).mean()
+
+        smooth_nonull = smoothed.dropna(dim="time")
+        focus_height = smooth_nonull.isel(
+            height=smooth_nonull.argmax(dim="height")
+        ).reindex(time=smoothed.time)
+
+        fig, ax = plt.subplots(figsize=(5, 6), tight_layout=True)
+        smoothed.plot(ax=ax)
+        ax.plot(focus_height.height, focus_height.time, "r.-")
+        fig.savefig("plots/objective.png")
+        plt.close(fig)
+
+        # Second pass — reconstruct images at the smoothed focus heights
+        second_pass_inputs = [
+            (ii, ts, time, focus_height.isel(time=ii).height.item())
+            for ii, (ts, time) in enumerate(zip(time_windows, times, strict=True))
+            if not focus_height.isel(time=ii).height.isnull().item()
+        ]
+        if not second_pass_inputs:
+            raise RuntimeError("no valid focus heights after first pass; cannot continue")
+
+        logger.info(
+            "run_spectral_focusing: second pass (%d / %d windows have valid focus height)",
+            len(second_pass_inputs),
+            len(time_windows),
+        )
+        q2 = Manager().Queue()
+        listener2 = QueueListener(q2, *root_logger.handlers)
+        try:
+            listener2.start()
+            with Parallel(n_jobs=n_jobs) as parallel:
+                focused_slices = parallel(
+                    delayed(_process_focused_slice)(
+                        obs,
+                        rx,
+                        ts,
+                        time,
+                        height,
+                        image_maker,
+                        tec_name,
+                        block_shape,
+                        block_step,
+                        window,
+                        logscale_objective,
+                        lat_limits,
+                        lon_limits,
+                        q2,
+                    )
+                    for _ii, ts, time, height in second_pass_inputs
+                )
+        finally:
+            listener2.stop()
+
+        valid_slices = [s for s in focused_slices if s is not None]
+        if not valid_slices:
+            raise RuntimeError("second pass produced no valid slices")
+
+        data_focused = xarray.concat(valid_slices, "time")
+        data_focused = (
+            data_focused.merge(process_patches(data_focused))
+            .reindex(time=focus_height.time)
+            .assign(height=focus_height.height)
+        )
+
+    # --- Sparse image for global center finding -------------------------------
+    sparse_img = (
+        data_focused.image.where(data_focused.density > density_thresh)
+        .stack(row=("x", "y"))
+        .reset_index("row")
+        .dropna(dim="time", how="all")
+        .dropna(dim="row", how="all")
+        .reset_coords()
+    )
+
+    # --- Global center finding ------------------------------------------------
+    params = run_smoothed_center_finder(data_focused, sparse_img, center_finder)
+    logger.info("params fit in %d iterations", len(params["history"]["metric"]))
+
+    coord_center = (np.mean(lat_limits), np.mean(lon_limits))
+    data_focused = data_focused.assign(
+        center=("ci", params["center"]),
+        wavelength=xarray.DataArray(
+            params["wavelength"], coords={"time": sparse_img.time}
+        ),
+        offset=xarray.DataArray(params["offset"], coords={"time": sparse_img.time}),
+        phase=xarray.DataArray(params["phase"], coords={"time": sparse_img.time}),
+    ).assign_attrs(coord_center=coord_center)
+
+    return data_focused
 
 
 def get_fft_patches(
@@ -471,19 +640,25 @@ def get_fft_patches(
     window: xarray.DataArray,
     logscale_objective: bool,
 ) -> xarray.DataArray:
-    """
-    Compute the FFT patches for a given image.
+    """Compute the FFT patches for a given image.
+
+    Constructs overlapping blocks via a rolling window, applies the FFT
+    windowing function, computes the 2-D power spectrum of each block, and
+    optionally log-transforms the result.
 
     Args:
-        img: The input image DataArray.
-        block_shape: Shape of the FFT blocks.
-        hres: Horizontal resolution of the image.
-        block_step: Stride for block construction.
-        window: Windowing function.
-        logscale_objective: Whether to use log scale for the objective.
+        img: Input image ``DataArray`` with dims ``(x, y)``.
+        block_shape: ``(ny, nx)`` size of each FFT block.
+        hres: Horizontal resolution of the image (km per pixel); used to set
+            wavenumber coordinates.
+        block_step: Stride (in pixels) between consecutive block centres.
+        window: FFT windowing array of shape ``(1, 1, ny, nx)``.
+        logscale_objective: If ``True``, patch power is log10-transformed.
 
     Returns:
-        The computed FFT patches as a DataArray.
+        A ``DataArray`` of 2-D power spectra with dims
+        ``(px, py, kx, ky)`` where ``px``, ``py`` are spatial patch centres
+        and ``kx``, ``ky`` are wavenumbers (cycles km⁻¹).
     """
     wavenum = fftfreq(block_shape[0], hres)
     edges = block_shape[0] // (2 * block_step)
@@ -502,14 +677,22 @@ def get_fft_patches(
 
 
 def process_patches(data: xarray.Dataset) -> xarray.Dataset:
-    """
-    Identify the best FFT patch for each height.
+    """Identify the best FFT patch for each height.
+
+    Selects the spatial location ``(px, py)`` and wavenumber ``(kx, ky)`` of
+    the maximum power in the patch array, and computes the total objective
+    (sum over all patch locations).
 
     Args:
-        data: Dataset containing the FFT patches.
+        data: Dataset containing ``patch`` with dims
+            ``(..., px, py, kx, ky)``.
 
     Returns:
-        A dataset with the best patch and the associated objective value.
+        A ``Dataset`` with variables:
+
+        - ``F`` ``(..., px, py)``: power at the spectral peak.
+        - ``Fx``, ``Fy`` ``(..., px, py)``: wavenumbers at the peak.
+        - ``objective`` ``(...,)``: sum of ``F`` over ``(px, py)``.
     """
     result = (
         data.patch.isel(data.patch.argmax(dim=["kx", "ky"]))
@@ -524,7 +707,7 @@ def process_patches(data: xarray.Dataset) -> xarray.Dataset:
 def process_heights(
     obs: Any,
     rx: Any,
-    ts: slice,
+    ts: Any,
     heights: np.ndarray,
     lat_limits: tuple[float, float],
     lon_limits: tuple[float, float],
@@ -537,27 +720,31 @@ def process_heights(
     logscale_objective: bool,
     wlog: logging.Logger | None = None,
 ) -> xarray.Dataset | None:
-    """
-    Process all requested heights for a given time slice.
+    """Process all requested heights for a given time slice.
+
+    For each height, retrieves data, builds an image, and computes FFT patches.
+    Returns ``None`` immediately if data retrieval fails for any height.
 
     Args:
-        obs: Observation data.
-        rx: Receiver data.
-        ts: Time slice.
-        heights: Array of heights to process.
-        lat_limits: Latitude limits.
-        lon_limits: Longitude limits.
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        heights: Array of IPP heights (km) to process.
+        lat_limits: ``(min_lat, max_lat)`` bounds.
+        lon_limits: ``(min_lon, max_lon)`` bounds.
         image_maker: Image maker object.
-        tec_name: Name of the TEC variable.
-        block_shape: Shape of the FFT blocks.
-        hres: Horizontal resolution.
-        block_step: Stride for block construction.
-        window: Windowing function.
-        logscale_objective: Whether to use log scale for the objective.
-        wlog: Optional logger for workers.
+        tec_name: Name of the TEC variable in the observation data.
+        block_shape: ``(ny, nx)`` shape of each FFT block.
+        hres: Horizontal resolution of the image (km per pixel).
+        block_step: Stride used when extracting rolling blocks.
+        window: FFT windowing array of shape ``(1, 1, ny, nx)``.
+        logscale_objective: If ``True``, patch power is log10-transformed.
+        wlog: Optional logger for worker processes; falls back to module logger.
 
     Returns:
-        The dataset containing images and patches for all heights, or None if processing failed.
+        A ``Dataset`` with dims ``(height, x, y)`` containing variables
+        ``image``, ``patch``, and ``n`` (data-point count per height), or
+        ``None`` if data retrieval failed for any height.
     """
     if wlog is None:
         wlog = logger
@@ -592,307 +779,34 @@ def process_heights(
     return data
 
 
-class BlockSpectralFocusing:
-    def __init__(
-        self,
-        image_maker: ImageMakerBase,
-        center_finder,
-        height_min: int,
-        height_max: int,
-        height_step: int,
-        block_size: int,
-        block_step: int,
-        kaiser_beta: int,
-        logscale_objective: bool,
-        n_jobs: int,
-        tec_name: str,
-        lat_limits=None,
-        lon_limits=None,
-    ):
-        self.n_jobs = n_jobs
-        self.tec_name = tec_name
-        self.image_maker = image_maker
-        self.center_finder = center_finder
-        self.heights = np.arange(height_min, height_max, height_step)
-        self.block_shape = (block_size, block_size)
-        self.block_step = block_step
-        k = kaiser(block_size, kaiser_beta)
-        self.window = np.outer(k, k).reshape(1, 1, block_size, block_size)
-        self.logscale_objective = logscale_objective
-        self.lat_limits = lat_limits
-        self.lon_limits = lon_limits
-        if n_jobs > 1:
-            self.run_time = delayed(self.run_time)
-
-    def initialize_image_maker(self, obs, rx, window: int, step: int):
-        slices = make_time_windows(obs["time"], window, step)
-        height = self.heights[len(self.heights) // 2]
-        logger.info("running initializer")
-
-        if self.n_jobs > 1:
-
-            @delayed
-            def fn(ts):
-                data = get_data(obs, rx, ts, height, self.lat_limits, self.lon_limits)
-                if data is None:
-                    return 0
-                s = len(data)
-                return s
-
-            with (
-                tqdm_joblib(desc="initializing", total=len(slices)),
-                Parallel(n_jobs=self.n_jobs) as parallel,
-            ):
-                sizes = parallel(fn(ts) for ts in slices)
-        else:
-            sizes = []
-            for ts in slices:
-                data = get_data(obs, rx, ts, height, self.lat_limits, self.lon_limits)
-                if data is None:
-                    return 0
-                sizes.append(len(data))
-
-        ii = np.argmax(sizes)
-        logger.info("initializer finished, best slice -> %d: %d", ii, sizes[ii])
-        data = get_data(obs, rx, slices[ii], height, self.lat_limits, self.lon_limits)
-        self.image_maker.initialize(data["x"].values, data["y"].values)
-
-    def run(self, obs, rx, window: int, step: int):
-        return run_block_spectral_focusing(
-            obs,
-            rx,
-            window,
-            step,
-            self.image_maker,
-            self.center_finder,
-            self.heights,
-            self.block_shape,
-            self.block_step,
-            self.window,
-            self.logscale_objective,
-            self.n_jobs,
-            self.tec_name,
-            self.lat_limits,
-            self.lon_limits,
-        )
-
-    def _sequential_get_results(self, obs, rx, slices, times):
-        results = []
-        for ts, time in zip(slices, times, strict=True):
-            r = run_spectral_time_slice(
-                obs,
-                rx,
-                ts,
-                time,
-                None,
-                self.heights,
-                self.lat_limits,
-                self.lon_limits,
-                self.image_maker,
-                self.tec_name,
-                self.block_shape,
-                self.block_step,
-                self.window,
-                self.logscale_objective,
-                self.center_finder,
-            )
-            results.append(r)
-        return results
-
-    def _parallel_get_results(self, obs, rx, slices, times):
-        q = Manager().Queue()
-        root_logger = logging.getLogger()
-        listener = QueueListener(q, *root_logger.handlers)
-
-        try:
-            listener.start()
-            with Parallel(n_jobs=self.n_jobs) as parallel:
-                results = parallel(
-                    delayed(run_spectral_time_slice)(
-                        obs,
-                        rx,
-                        ts,
-                        time,
-                        q,
-                        self.heights,
-                        self.lat_limits,
-                        self.lon_limits,
-                        self.image_maker,
-                        self.tec_name,
-                        self.block_shape,
-                        self.block_step,
-                        self.window,
-                        self.logscale_objective,
-                        self.center_finder,
-                    )
-                    for ts, time in zip(slices, times, strict=True)
-                )
-        finally:
-            listener.stop()
-        return results
-
-    def run_time(self, obs, rx, ts: slice, time, log_queue=None):
-        # This method is kept for compatibility with some internal mechanisms
-        # but now simply delegates to the functional version.
-        return run_spectral_time_slice(
-            obs,
-            rx,
-            ts,
-            time,
-            log_queue,
-            self.heights,
-            self.lat_limits,
-            self.lon_limits,
-            self.image_maker,
-            self.tec_name,
-            self.block_shape,
-            self.block_step,
-            self.window,
-            self.logscale_objective,
-            self.center_finder,
-        )
-
-    def run_center_finder(self, obs, rx, F, ts):
-        X, Y = np.meshgrid(F.px.values, F.py.values)
-        pts = np.column_stack([X.ravel(), Y.ravel()])
-        weights = F.F.values.ravel()
-        vectors = np.column_stack((F.Fx.values.ravel(), F.Fy.values.ravel()))
-        k = np.hypot(vectors[:, 0], vectors[:, 1])
-        c0 = find_center(pts, vectors, weights)
-        w0 = 1 / k.max()
-
-        data = get_data(obs, rx, ts, F.height.values, self.lat_limits, self.lon_limits)
-        result = self.center_finder(
-            c0, w0, data["x"].values, data["y"].values, data[self.tec_name].values
-        )
-        return result
-
-    def process_heights(self, obs, rx, ts, wlog=None):
-        return process_heights(
-            obs,
-            rx,
-            ts,
-            self.heights,
-            self.lat_limits,
-            self.lon_limits,
-            self.image_maker,
-            self.tec_name,
-            self.block_shape,
-            self.image_maker.hres,
-            self.block_step,
-            self.window,
-            self.logscale_objective,
-            wlog=wlog,
-        )
-
-    def get_fft_patches(self, img: xarray.DataArray) -> xarray.DataArray:
-        return get_fft_patches(
-            img,
-            self.block_shape,
-            self.image_maker.hres,
-            self.block_step,
-            self.window,
-            self.logscale_objective,
-        )
-
-    def process_patches(self, data) -> xarray.Dataset:
-        return process_patches(data)
-
-
-class SmoothedPatchSpectral(BlockSpectralFocusing):
-    def __init__(self, *args, time_window=15, density_thresh=20, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.time_window = time_window
-        self.density_thresh = density_thresh
-
-    def run_time(self, obs, rx, ts: slice, time, log_queue=None, return_data=False):
-        return run_spectral_time_slice(
-            obs,
-            rx,
-            ts,
-            time,
-            log_queue,
-            self.heights,
-            self.lat_limits,
-            self.lon_limits,
-            self.image_maker,
-            self.tec_name,
-            self.block_shape,
-            self.block_step,
-            self.window,
-            self.logscale_objective,
-            None,  # For SmoothedPatchSpectral, we don't use center_finder during run_time
-            return_data=return_data,
-        )
-
-    def run(self, obs, rx, window: int, step: int):
-        return run_smoothed_patch_spectral(
-            obs,
-            rx,
-            window,
-            step,
-            self.image_maker,
-            self.center_finder,
-            self.heights,
-            self.block_shape,
-            self.block_step,
-            self.window,
-            self.logscale_objective,
-            self.n_jobs,
-            self.tec_name,
-            self.lat_limits,
-            self.lon_limits,
-            self.time_window,
-            self.density_thresh,
-        )
-
-    def run_center_finder(self, data, sparse_img):
-        logger.info("finding center")
-        d = data.isel(time=data.objective.argmax())
-
-        fig, _ = plot_center_finder(d)
-        fig.savefig("plots/center_init.png")
-        plt.close(fig)
-
-        X, Y = np.meshgrid(d.px.values, d.py.values)
-        pts = np.column_stack([X.ravel(), Y.ravel()])
-        weights = d.F.values.ravel()
-        vectors = np.column_stack((d.Fx.values.ravel(), d.Fy.values.ravel()))
-        k = np.hypot(vectors[:, 0], vectors[:, 1])
-        c0 = find_center(pts, vectors, weights)
-        w0 = 1 / k.max()
-
-        result = self.center_finder(
-            c0, w0, sparse_img.x.values, sparse_img.y.values, sparse_img.image.values.T
-        )
-        return result
-
-
 def run_image_generation(
     obs: Any,
     rx: Any,
-    ts: slice,
+    ts: Any,
     time: Any,
     image_maker: Any,
     lat_limits: tuple[float, float],
     lon_limits: tuple[float, float],
     log_queue: Any | None = None,
 ) -> xarray.DataArray | None:
-    """
-    Generate an image for a specific time slice at a fixed height.
+    """Generate an image for a specific time slice at a fixed height.
+
+    Retrieves data at 350 km IPP height and calls the image maker to produce
+    a gridded TEC image.
 
     Args:
-        obs: Observation data.
-        rx: Receiver data.
-        ts: Time slice.
-        time: Start time of the slice.
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        time: Start timestamp of this window; used as the ``time`` coordinate.
         image_maker: Image maker object.
-        lat_limits: Latitude limits.
-        lon_limits: Longitude limits.
-        log_queue: Queue for worker logging.
+        lat_limits: ``(min_lat, max_lat)`` bounds.
+        lon_limits: ``(min_lon, max_lon)`` bounds.
+        log_queue: Optional multiprocessing queue for worker logging.
 
     Returns:
-        The generated image as a DataArray, or None if processing failed.
+        A ``DataArray`` with dims ``(time, x, y)``, or ``None`` if data
+        retrieval failed.
     """
     wlog, handler = configure_worker_logger(log_queue)
     try:
@@ -910,30 +824,30 @@ def run_image_generation(
 def run_image_maker_orchestrator(
     obs: Any,
     rx: Any,
-    window: int,
+    window_size: int,
     step: int,
     image_maker: Any,
     n_jobs: int,
     lat_limits: tuple[float, float],
     lon_limits: tuple[float, float],
 ) -> xarray.Dataset:
-    """
-    Orchestrate the image generation pipeline across multiple time slices.
+    """Orchestrate image generation across multiple time slices.
 
     Args:
-        obs: Observation data.
-        rx: Receiver data.
-        window: Time window size.
-        step: Time window step.
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        window_size: Number of unique time steps per sliding window.
+        step: Stride between consecutive windows.
         image_maker: Image maker object.
-        n_jobs: Number of parallel jobs.
-        lat_limits: Latitude limits.
-        lon_limits: Longitude limits.
+        n_jobs: Number of parallel worker processes.
+        lat_limits: ``(min_lat, max_lat)`` bounds.
+        lon_limits: ``(min_lon, max_lon)`` bounds.
 
     Returns:
-        The concatenated dataset of generated images.
+        A ``Dataset`` produced by concatenating all per-slice images along
+        the ``time`` dimension, with ``None`` slices dropped.
     """
-    slices = make_time_windows(obs["time"], window, step)
+    slices = make_time_windows(obs["time"], window_size, step)
     times = [w.start_time for w in slices]
 
     q = Manager().Queue()
@@ -960,42 +874,3 @@ def run_image_maker_orchestrator(
         listener.stop()
 
     return xarray.concat(filter(lambda x: x is not None, results), dim="time")
-
-
-class ImageMaker:
-    def __init__(
-        self,
-        image_maker: ImageMakerBase,
-        n_jobs: int,
-        lat_limits=None,
-        lon_limits=None,
-        **kwargs,
-    ):
-        self.image_maker = image_maker
-        self.n_jobs = n_jobs
-        self.lat_limits = lat_limits
-        self.lon_limits = lon_limits
-
-    def run(self, obs, rx, window: int, step: int):
-        return run_image_maker_orchestrator(
-            obs,
-            rx,
-            window,
-            step,
-            self.image_maker,
-            self.n_jobs,
-            self.lat_limits,
-            self.lon_limits,
-        )
-
-    def run_time(self, obs, rx, ts: slice, time, log_queue=None):
-        return run_image_generation(
-            obs,
-            rx,
-            ts,
-            time,
-            self.image_maker,
-            self.lat_limits,
-            self.lon_limits,
-            log_queue,
-        )

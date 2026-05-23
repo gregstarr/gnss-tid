@@ -2,12 +2,14 @@ defaults:
   - image_maker: rbf
   - center_finder: stationary
 
-_target_: gnss_tid.spectral.ImageMaker
 height_min: 150
 height_max: 400
 height_step: 10
 block_size: 32
 block_step: 16
 kaiser_beta: 1
-logscale_objective: True
-n_jobs: 20
+logscale_objective: false
+density_thresh: 10
+time_window: 15
+n_jobs: 16
+tec_name: dtec1
