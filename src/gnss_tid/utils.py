@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
 from collections.abc import Iterable
-from typing import Union, List
+from pathlib import Path
 
-import numpy as np
-
-PathLike = Union[str, Path]
-PathInput = Union[PathLike, Iterable[PathLike]]
+PathLike = str | Path
+PathInput = PathLike | Iterable[PathLike]
 
 
 def normalize_paths(
@@ -15,7 +12,7 @@ def normalize_paths(
     *,
     expand_user: bool = True,
     resolve: bool = True,
-) -> List[Path]:
+) -> list[Path]:
     """
     Normalize a flexible path input into a list of pathlib.Path objects.
 
@@ -51,7 +48,7 @@ def normalize_paths(
         # Basic heuristic: contains any glob metacharacters
         return any(ch in s for ch in "*?[]")
 
-    def _process_single(p: PathLike) -> List[Path]:
+    def _process_single(p: PathLike) -> list[Path]:
         # Convert to Path and (optionally) expand ~
         p = Path(p)
         if expand_user:
@@ -95,18 +92,8 @@ def normalize_paths(
                 return p.absolute()
         return p
 
-    normalized: List[Path] = []
+    normalized: list[Path] = []
     for item in _to_iter(paths):
         normalized.extend(_process_single(item))
 
     return normalized
-
-
-def find_center(pts, vectors, weights):
-    vec_norm = np.linalg.norm(vectors, axis=1)
-    mask = vec_norm > 0
-    w = np.sqrt(weights[mask]) / vec_norm[mask]
-    A = np.column_stack([vectors[mask, 1], -vectors[mask, 0]]) * w[:, None]
-    b = np.sum(A * pts[mask], axis=1)
-    center, *_ = np.linalg.lstsq(A, b)
-    return center

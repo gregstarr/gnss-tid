@@ -6,7 +6,7 @@ import matplotlib.animation as animation
 from scipy.ndimage import maximum_filter1d
 from tqdm import autonotebook
 
-from .utils import find_center
+from .center_finding import find_center
 
 
 def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):

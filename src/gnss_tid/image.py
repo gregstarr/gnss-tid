@@ -1,5 +1,5 @@
-from typing import Protocol
 import logging
+from typing import Protocol
 
 import numpy as np
 import xarray
@@ -12,13 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 class ImageMaker(Protocol):
-    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray: ...
+    def __call__(
+        self, x: np.ndarray, y: np.ndarray, tec: np.ndarray
+    ) -> xarray.DataArray: ...
     def initialize(self, x: np.ndarray, y: np.ndarray): ...
     def get_data_density(self, x, y, threshold) -> xarray.DataArray: ...
 
 
 class MetpyImageMaker:
-    def __init__(self, hres, hp_freq=.05, neighbor_radius=100, **kwargs):
+    def __init__(self, hres, hp_freq=0.05, neighbor_radius=100, **kwargs):
         self.kwargs = kwargs
         self.hp_freq = hp_freq
         self.hres = hres
@@ -37,12 +39,12 @@ class MetpyImageMaker:
         self.shape = x_grid.shape
         self.xp = x_grid[0]
         self.yp = y_grid[:, 0]
-    
+
     def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray:
         if self.points is None:
             logger.warning("ImageMaker not initialized. Initializing from first inputs.")
             self.initialize(x, y)
-        
+
         pts = np.column_stack((x, y))
         img = mtpi.interpolate_to_points(pts, tec, self.points, **self.kwargs)
         img = img.reshape(self.shape)
@@ -52,7 +54,7 @@ class MetpyImageMaker:
         img = xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
         w = self.get_data_density(x, y, self.neighbor_radius)
         return xarray.Dataset({"image": img, "density": w})
-    
+
     def get_data_density(self, x, y, threshold):
         pd = pairwise_distances(self.points, np.column_stack((x, y)))
         n = np.sum(pd < threshold, axis=1)
@@ -61,7 +63,7 @@ class MetpyImageMaker:
 
 
 class ScipyRbfImageMaker:
-    def __init__(self, hres, hp_freq=.05, neighbor_radius=100, **kwargs):
+    def __init__(self, hres, hp_freq=0.05, neighbor_radius=100, **kwargs):
         self.kwargs = kwargs
         self.hp_freq = hp_freq
         self.hres = hres
@@ -83,18 +85,20 @@ class ScipyRbfImageMaker:
         self.yp = y_grid[:, 0]
         # matches legacy rbf by default
         if "epsilon" not in self.kwargs:
-            edges = np.array([
-                boundary_coords["east"] - boundary_coords["west"],
-                boundary_coords["north"] - boundary_coords["south"]
-            ])
-            self.kwargs["epsilon"] = 1 / np.power(np.prod(edges)/len(x), .5)
+            edges = np.array(
+                [
+                    boundary_coords["east"] - boundary_coords["west"],
+                    boundary_coords["north"] - boundary_coords["south"],
+                ]
+            )
+            self.kwargs["epsilon"] = 1 / np.power(np.prod(edges) / len(x), 0.5)
             logger.info("computed epsilon: %.2f", self.kwargs["epsilon"])
-    
+
     def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray:
         if self.points is None:
             logger.warning("ImageMaker not initialized. Initializing from first inputs.")
             self.initialize(x, y)
-        
+
         fin = np.isfinite(tec)
         pts = np.column_stack((x, y))[fin]
         rbf = RBFInterpolator(pts, tec[fin], **self.kwargs)
@@ -107,7 +111,7 @@ class ScipyRbfImageMaker:
         img = xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
         w = self.get_data_density(x, y, self.neighbor_radius)
         return xarray.Dataset({"image": img, "density": w})
-    
+
     def get_data_density(self, x, y, threshold):
         pd = pairwise_distances(self.points, np.column_stack((x, y)))
         n = np.sum(pd < threshold, axis=1)

@@ -14,10 +14,10 @@ from scipy.fft import fft2, fftfreq
 from scipy.signal.windows import kaiser
 from tqdm_joblib import tqdm_joblib
 
+from .center_finding import find_center
 from .image import ImageMaker as ImageMakerBase
 from .plotting import plot_center_finder
 from .pointdata import get_data, make_time_windows
-from .utils import find_center
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ def run_block_spectral_focusing(
         The final dataset containing focused spectral parameters.
     """
     # Initialize image maker
-    slices = make_time_windows(obs["time"], window, step)
+    time_windows = make_time_windows(obs["time"], window, step)
     mid_height = heights[len(heights) // 2]
     logger.info("running initializer")
 
@@ -132,24 +132,24 @@ def run_block_spectral_focusing(
             return len(data) if data is not None else 0
 
         with (
-            tqdm_joblib(desc="initializing", total=len(slices)),
+            tqdm_joblib(desc="initializing", total=len(time_windows)),
             Parallel(n_jobs=n_jobs) as parallel,
         ):
-            sizes = parallel(fn(ts) for ts in slices)
+            sizes = parallel(fn(ts) for ts in time_windows)
     else:
         sizes = []
-        for ts in slices:
+        for ts in time_windows:
             data = get_data(obs, rx, ts, mid_height, lat_limits, lon_limits)
             sizes.append(len(data) if data is not None else 0)
 
     ii = np.argmax(sizes)
     logger.info("initializer finished, best slice -> %d: %d", ii, sizes[ii])
-    init_data = get_data(obs, rx, slices[ii], mid_height, lat_limits, lon_limits)
+    init_data = get_data(obs, rx, time_windows[ii], mid_height, lat_limits, lon_limits)
     image_maker.initialize(init_data["x"].values, init_data["y"].values)
 
     logger.info("running BlockSpectralFocusing n_jobs=%d", n_jobs)
     Path("plots").mkdir(exist_ok=True)
-    times = [w.start_time for w in slices]
+    times = [w.start_time for w in time_windows]
 
     q = Manager().Queue()
     root_logger = logging.getLogger()
@@ -176,7 +176,7 @@ def run_block_spectral_focusing(
                     logscale_objective,
                     center_finder,
                 )
-                for ts, time in zip(slices, times, strict=True)
+                for ts, time in zip(time_windows, times, strict=True)
             )
     finally:
         listener.stop()
