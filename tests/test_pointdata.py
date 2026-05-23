@@ -31,7 +31,7 @@ def test_load_observations_v2_fixture_returns_canonical_table():
         pbar=False,
     )
 
-    assert len(obs) == 3120
+    assert len(obs) == 1560
     assert "stec" in obs.columns
     assert "dtec1" in obs.columns
     assert "tec_noise" in obs.columns

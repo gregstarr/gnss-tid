@@ -433,8 +433,8 @@ def _apply_tec_filtering_df(df: pd.DataFrame, q_thresh: float) -> pd.DataFrame:
 
 def load_observations(
     files: Path | list[Path],
-    latitude_limits,
-    longitude_limits,
+    lat_limits,
+    lon_limits,
     time_limits,
     el_min: float = 0,
     q_thresh: float = 0.99,
@@ -467,7 +467,7 @@ def load_observations(
         raise ValueError("no observation files were provided")
 
     time_limits = _normalize_time_limits(time_limits)
-    load_args = (latitude_limits, longitude_limits, time_limits, el_min)
+    load_args = (lat_limits, lon_limits, time_limits, el_min)
 
     if n_jobs == 1:
         results = [_load_file(file, *load_args) for file in paths]
