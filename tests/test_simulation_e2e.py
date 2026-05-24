@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from gnss_tid.simulation_3d import ShellGrid, SimulationScenario, generate_gaussian_blob
+from gnss_tid.simulation_3d import ShellGrid, SimulationScenario
 from gnss_tid.pointdata import OBS_COLUMNS
 
 def test_simulation_e2e():
@@ -11,7 +11,6 @@ def test_simulation_e2e():
     altitudes = np.arange(100, 500, 100)
     
     grid = ShellGrid(
-        altitudes=altitudes, 
         res_lat=0.5, 
         res_lon=0.5, 
         lat_range=lat_range, 
@@ -19,10 +18,9 @@ def test_simulation_e2e():
     )
     
     # Add a Gaussian blob in the middle of the area
-    generate_gaussian_blob(
-        grid, 
-        lat0=35.0, lon0=-95.0, h0=300.0, 
-        A=1e12, sigma_lat=2.0, sigma_lon=2.0, sigma_h=100.0
+    grid.add_gaussian(
+        alt=300.0, lat0=35.0, lon0=-95.0, 
+        sigma_lat=2.0, sigma_lon=2.0, amplitude=1e12
     )
     
     scenario = SimulationScenario(grid, delta_h_eff=10.0)

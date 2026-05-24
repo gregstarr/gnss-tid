@@ -2,18 +2,17 @@ import numpy as np
 from gnss_tid.simulation_3d import (
     ShellGrid,
     SimulationScenario,
-    generate_gaussian_blob,
-    generate_slab,
 )
 
 
 def test_shell_grid_indexing():
-    grid = ShellGrid(altitudes=[300, 400], res_lat=1.0, res_lon=1.0)
+    grid = ShellGrid(res_lat=1.0, res_lon=1.0)
     # Test point (0, 0) should be at index (90, 180) since lat -90..90 and lon -180..180
     # lat 0: (0 + 90) / 1 = 90
     # lon 0: (0 + 180) / 1 = 180
-    grid.set_value(300, 0, 0, 10.0)
+    grid.add_uniform(300, 10.0)
     assert grid.get_delta_ne(0, 0, 300) == 10.0
+
 
     # Test boundary
     grid.set_value(300, 90, 180, 1.0)
@@ -22,22 +21,20 @@ def test_shell_grid_indexing():
 
 
 def test_pattern_verification():
-    grid = ShellGrid(altitudes=[300, 400], res_lat=1.0, res_lon=1.0)
+    grid = ShellGrid(res_lat=1.0, res_lon=1.0)
 
     # Gaussian Blob: peak at (0, 0, 300)
-    generate_gaussian_blob(
-        grid, lat0=0, lon0=0, h0=300, A=1.0, sigma_lat=1.0, sigma_lon=1.0, sigma_h=10.0
+    grid.add_gaussian(
+        alt=300, lat0=0, lon0=0, sigma_lat=1.0, sigma_lon=1.0, amplitude=1.0
     )
     # Peak value should be approximately 1.0 at (0,0,300)
     assert np.isclose(grid.get_delta_ne(0, 0, 300), 1.0, atol=1e-2)
 
-    # Slab: shells 300 and 400 should be filled
-    generate_slab(grid, alt_start=200, alt_end=500, value=5.0)
-    # The slab generator adds to existing values if we were using additive logic,
-    # but in current implementation it sets values.
-    # Wait, generate_slab uses `grid.shells[alt][:] = value` which overwrites.
-    # Let's check a few points.
-    assert grid.get_delta_ne(0, 0, 300) == 5.0
+    # Uniform: shells 300 and 400 should be filled
+    grid.add_uniform(alt=300, value=5.0)
+    grid.add_uniform(alt=400, value=5.0)
+    # The uniform setter sets values.
+    assert grid.get_delta_ne(0, 0, 300) == 6.0 # 1.0 from gaussian + 5.0 from uniform
     assert grid.get_delta_ne(45, 45, 400) == 5.0
     print("test_pattern_verification passed")
 
@@ -45,8 +42,9 @@ def test_pattern_verification():
 def test_linearity():
     # Verify that adding two shells with same delta Ne doubles the TEC
     # We'll use the simulation scenario to check this.
-    grid = ShellGrid(altitudes=[300, 400], res_lat=1.0, res_lon=1.0)
-    generate_slab(grid, 200, 500, 1.0)
+    grid = ShellGrid(res_lat=1.0, res_lon=1.0)
+    grid.add_uniform(alt=300, value=1.0)
+    grid.add_uniform(alt=400, value=1.0)
 
     scenario = SimulationScenario(grid, delta_h_eff=10.0)
 
@@ -54,10 +52,12 @@ def test_linearity():
     r = np.array([6378.137, 0, 0])
     s = np.array([6378.137 + 20000, 0, 0])
 
+    scenario = SimulationScenario(grid, delta_h_eff=10.0, receivers=np.array([r]), satellites=np.array([s]))
+
     # Single shell result
     # For this setup, both shells (300 and 400) will be intersected
     # delta Ne = 1.0, delta H = 10.0, 2 shells = 20.0 TEC
-    tec = scenario.generate_tec(np.array([r]), np.array([s]))
+    tec = scenario.generate_tec()
 
     assert np.isclose(tec[0, 0], 20.0), f"Expected 20.0, got {tec[0, 0]}"
     print("test_linearity passed")

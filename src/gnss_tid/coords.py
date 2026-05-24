@@ -106,12 +106,12 @@ class Local2D:
 
 def spherical2ecef(lat: np.ndarray, lon: np.ndarray, radius: np.ndarray):
     """convert spherical coordinates to ECEF
-
+    
     Parameters
     ----------
-    lat, lon: spherical coordinates
+    lat, lon: spherical coordinates in degrees
     radius: radius from earth center
-
+    
     Returns
     -------
     Nx3 vector of ecef coordinates
@@ -119,26 +119,38 @@ def spherical2ecef(lat: np.ndarray, lon: np.ndarray, radius: np.ndarray):
     lat = np.asarray(lat, dtype=np.float64)
     lon = np.asarray(lon, dtype=np.float64)
     radius = np.asarray(radius, dtype=np.float64)
-    rotations = np.column_stack([lon, -1 * lat])
-    base = np.column_stack([radius, np.zeros_like(radius), np.zeros_like(radius)])
-    return Rotation.from_euler("ZY", rotations, degrees=True).apply(base)
+    # Use pymap3d for robust conversion: geodetic2ecef with 0 height is not exactly spherical
+    # However, the goal here is spherical coordinates.
+    # x = R * cos(lat) * cos(lon)
+    # y = R * cos(lat) * sin(lon)
+    # z = R * sin(lat)
+    lat_rad = np.radians(lat)
+    lon_rad = np.radians(lon)
+    x = radius * np.cos(lat_rad) * np.cos(lon_rad)
+    y = radius * np.cos(lat_rad) * np.sin(lon_rad)
+    z = radius * np.sin(lat_rad)
+    return np.stack([x, y, z], axis=-1)
 
 
 def ecef2spherical(x: np.ndarray, y: np.ndarray, z: np.ndarray):
     """convert ECEF coordinates to spherical
-
+    
     Parameters
     ----------
     x, y, z: ecef coordinates
-
+    
     Returns
     -------
     lat, lon: spherical coordinates
     radius: radius from earth center
     """
-    radius = np.linalg.norm(np.column_stack((x, y, z)))
+    # Handle both scalars and arrays
+    x = np.asarray(x)
+    y = np.asarray(y)
+    z = np.asarray(z)
+    radius = np.linalg.norm(np.stack([x, y, z], axis=-1), axis=-1)
     lon = np.rad2deg(np.atan2(y, x))
-    lat = np.rad2deg(np.asin(z / radius))
+    lat = np.rad2deg(np.arcsin(z / radius))
     return lat, lon, radius
 
 
