@@ -1,0 +1,31 @@
+defaults:
+  - _self_
+  - focus/image_maker@image_maker: rbf
+  - event: 20150325_full
+
+output_fn: "images.h5"
+tec_name: dtec1
+n_jobs: 8
+
+# Height source: provide EITHER `height` (constant km) OR `heights_file`
+# (path to a netCDF with a `height(time)` variable, e.g. an autofocus output).
+# If both are set, `heights_file` wins.
+height: 350
+heights_file: null
+
+sample:
+  window: 4
+  step: 2
+
+# When true, write one PNG per time step to `plots_dir`.
+write_pngs: false
+plots_dir: "frames"
+
+hydra:
+  job:
+    chdir: true
+  job_logging:
+    formatters:
+      simple:
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        fmt: "[%(asctime)s][%(name)s][%(levelname)s] %(message)s"
