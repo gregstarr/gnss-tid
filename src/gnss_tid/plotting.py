@@ -1,8 +1,8 @@
+import matplotlib.animation as animation
 import numpy as np
 import xarray
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
-import matplotlib.animation as animation
 from scipy.ndimage import maximum_filter1d
 from tqdm import autonotebook
 
@@ -41,7 +41,7 @@ def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
     scale = scale_base * data.kx.shape[0] / 32
     data.plot.quiver(
         ax=ax, x="px", y="py", u="vx", v="vy", hue="K", cmap="bone",
-        headwidth=0, headlength=0, headaxislength=0, add_guide=False, 
+        headwidth=0, headlength=0, headaxislength=0, add_guide=False,
         scale=scale, width=width, vmin=0, vmax=.01, pivot="mid", scale_units="xy",
         angles="xy",
     )
@@ -71,7 +71,7 @@ def plot_center_finder(data, scale=5):
     # Distance matrix: D[i, j]
     distances = numerator / denominator
     dw = np.sum(weights[None, mask] * np.exp(-(distances/100)**2), axis=1).reshape(XD.shape)
-    
+
     cg = tp[np.argmax(dw)]
 
     fig, ax = plt.subplots(1, 2, tight_layout=True, figsize=(12, 5))
@@ -79,7 +79,7 @@ def plot_center_finder(data, scale=5):
     ax[0].plot(cw[0], cw[1], 'x')
     ax[0].plot(cu[0], cu[1], 'x')
     ax[0].plot(cg[0], cg[1], 'x')
-    
+
     ax[1].pcolormesh(XD, YD, dw)
     ax[1].plot(cw[0], cw[1], 'x')
     ax[1].plot(cu[0], cu[1], 'x')
@@ -102,7 +102,7 @@ def plot_center_finder_fit(result_list, s=4, c0=None, cbox=None):
         else:
             ax[0, 2].plot(z[-1, 0], z[-1, 1], 'k.')
         ax[1, 0].semilogy(maximum_filter1d(np.diff(result["history"]["metric"]), 9))
-    
+
     if c0 is not None:
         ax[0, 2].plot(c0[0], c0[1], 'kx')
     if cbox is not None:
@@ -182,7 +182,7 @@ def make_animation(data, save_fn, limit=-1, writer="pillow", maxr=2400):
         ani = animation.ArtistAnimation(fig=fig, artists=animation_artists, interval=200)
         with autonotebook.tqdm(total=len(animation_artists), desc='Saving video') as progress_bar:
             ani.save(
-                filename=save_fn, 
+                filename=save_fn,
                 writer=writer,
                 progress_callback=lambda _i, _n: progress_bar.update()
             )
@@ -238,7 +238,7 @@ def plot_param_spatial_fft(
     ):
     if az_idx is None:
         az_idx = S.az.shape[0] // 2
-    
+
     if ax is None:
         fig, ax = plt.subplots(1, 1, tight_layout=True, figsize=(6, 5))
     else:
@@ -263,7 +263,7 @@ def plot_param_time_fft(
         az_idx = S.az.shape[0] // 2
     if r_idx is None:
         r_idx = S.r.shape[0] // 2
-    
+
     if ax is None:
         fig, ax = plt.subplots(1, 1, tight_layout=True, figsize=(6, 5))
     else:

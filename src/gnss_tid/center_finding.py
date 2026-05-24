@@ -208,9 +208,7 @@ class StationaryCenterFinder:
         return result
 
 
-def find_center(
-    pts: np.ndarray, vectors: np.ndarray, weights: np.ndarray
-) -> np.ndarray:
+def find_center(pts: np.ndarray, vectors: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Least-squares estimate of the wave centre from spectral patch vectors.
 
     Pure-numpy helper distinct from the torch-based :class:`CenterFinder` and

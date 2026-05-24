@@ -1,10 +1,9 @@
-import logging
 
-from numpy.typing import ArrayLike
-import numpy as np
 import dask.array as da
-import xarray as xr
+import numpy as np
 import pandas
+import xarray as xr
+from numpy.typing import ArrayLike
 
 
 def spherical_model(
@@ -21,15 +20,15 @@ def spherical_model(
     ) -> xr.DataArray:
     if time is None:
         time = pandas.date_range("2025-01-01", "2025-01-01T01:00:00", freq="60s")
-    
-    # don't chunk trial=1 for "generation + write" workflows with many trials. trial=1 
+
+    # don't chunk trial=1 for "generation + write" workflows with many trials. trial=1
     # creates thousands of tiny blocks, which inflates the task graph and slows scheduling.
     # Use a reasonable batch size (e.g., 20–100) to keep graph size and overhead down.
     batch_size = min(batch_size, n_trials)
-    
+
     trials = np.arange(0, n_trials)
-    
-    # keep per-trial parameters as simple NumPy (then chunk once). Using 
+
+    # keep per-trial parameters as simple NumPy (then chunk once). Using
     # da.random(..., chunks=1) for these made the graph larger because it adds RNG tasks
     # (and chunks=1 adds one chunk per trial). These arrays are small, so NumPy is fine.
     snr = xr.DataArray(
@@ -104,11 +103,11 @@ def planar_model(
     ) -> xr.DataArray:
     if time is None:
         time = pandas.date_range("2025-01-01", "2025-01-01T01:00:00", freq="60s")
-    
+
     batch_size = min(batch_size, n_trials)
-    
+
     trials = np.arange(0, n_trials)
-    
+
     snr = xr.DataArray(
         np.random.rand(n_trials) * (snr_lim[1] - snr_lim[0]) + snr_lim[0],
         coords=[("trial", trials)],

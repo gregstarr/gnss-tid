@@ -1,7 +1,7 @@
 import numpy as np
-from scipy.spatial.transform import Rotation
 import pymap3d
 import xarray
+from scipy.spatial.transform import Rotation
 
 
 class Local2D:
@@ -178,17 +178,17 @@ def aer2ipp(az, el, rxp, H=350):
         else:
             lat0 = rxp[:,0]
             lon0 = rxp[:,1]
-    
+
     Req = 6378.137
     f = 1/298.257223563
-    
+
     R = np.sqrt(Req**2 / (1 + (1/(1-f)**2 -1) * np.sin(np.radians(lat0))**2))
-    
+
     psi = (np.pi/2 - np.radians(el)) - np.arcsin(R / (R+H) * np.cos(np.radians(el)))
-    
+
     lat = np.arcsin(np.sin(np.radians(lat0)) * np.cos(psi) + \
                     np.cos(np.radians(lat0)) * np.sin(psi) * np.cos(np.radians(az)))
-    
+
     lon = np.radians(lon0) + np.arcsin(np.sin(psi) * np.sin(np.radians(az)) / np.cos(lat))
-    
+
     return np.degrees(lat), np.degrees(lon)
