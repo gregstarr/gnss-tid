@@ -37,7 +37,12 @@ def save_data(data_fn):
 
 
 def get_template(data, nfft, block_size, step_size):
-    temp = gnss_tid.parameter.estimate_parameters_block_unopt(data.isel(lam=0, tau=0, snr=0), nfft, block_size, step_size)
+    temp = gnss_tid.parameter.estimate_parameters_block(
+        data.isel(lam=0, tau=0, snr=0),
+        Nfft=nfft,
+        block_size=block_size,
+        step_size=step_size,
+    )
     temp = temp.expand_dims(lam=data.lam, tau=data.tau, snr=data.snr)
     return temp.chunk(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
 
@@ -66,7 +71,7 @@ if __name__ == "__main__":
     template = get_template(data, NFFT, BLOCK_SIZE, STEP_SIZE)
 
     params = data.map_blocks(
-        gnss_tid.parameter.estimate_parameters_block_unopt,
+        gnss_tid.parameter.estimate_parameters_block,
         kwargs={
             "Nfft": NFFT,
             "block_size": BLOCK_SIZE,

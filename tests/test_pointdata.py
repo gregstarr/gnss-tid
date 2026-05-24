@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from gnss_tid.coords import Local2D
 from gnss_tid.pointdata import (
     aggregate_by_receiver_satellite,
     convert_to_local_coords,
@@ -249,7 +250,8 @@ def test_convert_to_local_coords_adds_x_y():
             "lon": [-95.0],
         }
     )
-    result = convert_to_local_coords(obs_df, [0.0, 90.0], [-180.0, 180.0], 350.0)
+    proj = Local2D.from_geodetic(45.0, 0.0, 350.0)
+    result = convert_to_local_coords(obs_df, proj)
 
     assert "x" in result.columns
     assert "y" in result.columns
@@ -258,7 +260,7 @@ def test_convert_to_local_coords_adds_x_y():
     assert np.isfinite(result["y"].iloc[0])
 
 
-def test_get_data_with_use_local_cs_false():
+def test_get_data_without_proj_skips_local_cs():
     obs, rx = load_observations(
         V2_FILES,
         [0.0, 90.0],
@@ -268,15 +270,33 @@ def test_get_data_with_use_local_cs_false():
         pbar=False,
     )
     windows = make_time_windows(obs, 4, 2)
-    out = get_data(
-        obs, rx, windows[0], 350, [0.0, 90.0], [-180.0, 180.0], use_local_cs=False
-    )
+    out = get_data(obs, rx, windows[0], 350, [0.0, 90.0], [-180.0, 180.0])
 
     assert out is not None
     assert "lat" in out.columns
     assert "lon" in out.columns
     assert "x" not in out.columns
     assert "y" not in out.columns
+
+
+def test_get_data_with_proj_adds_local_cs():
+    obs, rx = load_observations(
+        V2_FILES,
+        [0.0, 90.0],
+        [-180.0, 180.0],
+        ["20150324_000000", "20150327_000000"],
+        n_jobs=1,
+        pbar=False,
+    )
+    windows = make_time_windows(obs, 4, 2)
+    proj = Local2D.from_geodetic(45.0, 0.0, 350.0)
+    out = get_data(
+        obs, rx, windows[0], 350, [0.0, 90.0], [-180.0, 180.0], proj=proj
+    )
+
+    assert out is not None
+    assert "x" in out.columns
+    assert "y" in out.columns
 
 
 def test_get_data_returns_none_when_no_obs_in_window():

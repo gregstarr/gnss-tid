@@ -603,25 +603,20 @@ def project_to_ipp(
 
 def convert_to_local_coords(
     grouped: pd.DataFrame,
-    latitude_limits: list,
-    longitude_limits: list,
-    h: float,
+    proj: Local2D,
 ) -> pd.DataFrame:
-    """Convert geodetic coordinates to local x/y system.
+    """Project geodetic coordinates into a shared local x/y frame.
 
     Args:
-        grouped: DataFrame with lat, lon columns
-        latitude_limits: [min, max] latitude bounds
-        longitude_limits: [min, max] longitude bounds
-        h: Height for coordinate conversion
+        grouped: DataFrame with ``lat`` and ``lon`` columns.
+        proj: Local cartesian projection (typically constructed once at the
+            orchestration layer so every slice and the image grid share a
+            single frame).
 
     Returns:
-        DataFrame with added x, y columns
+        DataFrame with added ``x`` and ``y`` columns (km).
     """
-    center_lat = float(np.mean(latitude_limits))
-    center_lon = float(np.mean(longitude_limits))
-    local_coords = Local2D.from_geodetic(center_lat, center_lon, h)
-    x, y = local_coords.convert_from_spherical(
+    x, y = proj.convert_from_spherical(
         grouped["lat"].to_numpy(),
         grouped["lon"].to_numpy(),
     )
@@ -655,8 +650,15 @@ def get_data(
     h: float,
     lat_limits: list | None = None,
     lon_limits: list | None = None,
-    use_local_cs: bool = True,
+    proj: Local2D | None = None,
 ) -> pd.DataFrame | None:
+    """Return a per-slice observation DataFrame, optionally projected to local CS.
+
+    When ``proj`` is provided, the slice's geodetic (lat, lon) are projected
+    into ``proj``'s shared local cartesian frame (adding ``x``, ``y`` columns).
+    When ``proj`` is ``None``, the local projection step is skipped and only
+    geodetic coordinates are returned.
+    """
     df = get_obs_in_window(obs, time_spec)
     if df is None:
         return
@@ -683,7 +685,7 @@ def get_data(
         LOGGER.warning("empty lat data: %s", time_spec)
         return None
 
-    if use_local_cs:
-        df = convert_to_local_coords(df, lat_limits, lon_limits, h)
+    if proj is not None:
+        df = convert_to_local_coords(df, proj)
 
     return df

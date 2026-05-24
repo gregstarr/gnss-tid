@@ -4,17 +4,18 @@ import traceback
 import hydra
 import numpy as np
 from omegaconf import DictConfig
-from scipy.signal.windows import kaiser
 
+from gnss_tid.coords import Local2D
+from gnss_tid.fft import make_kaiser_2d
 from gnss_tid.plotting import make_animation
 from gnss_tid.pointdata import load_observations
-from gnss_tid.spectral import run_spectral_focusing
+from gnss_tid.spectral import SpectralConfig, run_spectral_focusing
 
 logger = logging.getLogger(__name__)
 
 
-def _build_pipeline_kwargs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
-    """Build keyword arguments for :func:`~gnss_tid.spectral.run_spectral_focusing`.
+def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
+    """Build inputs for :func:`~gnss_tid.spectral.run_spectral_focusing`.
 
     Args:
         obs: Observation DataFrame returned by load_observations.
@@ -24,36 +25,51 @@ def _build_pipeline_kwargs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         lon_limits: Tuple of (min_lon, max_lon) drawn from the event config.
 
     Returns:
-        Dictionary of keyword arguments accepted by
-        :func:`~gnss_tid.spectral.run_spectral_focusing`.
+        A 2-tuple ``(spectral_cfg, orchestration_kwargs)``:
+
+        - ``spectral_cfg``: :class:`~gnss_tid.spectral.SpectralConfig` bundling
+          the per-worker static inputs.
+        - ``orchestration_kwargs``: dict of the remaining keyword arguments
+          accepted by :func:`~gnss_tid.spectral.run_spectral_focusing`.
     """
     heights = np.arange(cfg.focus.height_min, cfg.focus.height_max, cfg.focus.height_step)
     block_size = cfg.focus.block_size
-    k = kaiser(block_size, cfg.focus.kaiser_beta)
-    window = np.outer(k, k).reshape(1, 1, block_size, block_size)
+    window = make_kaiser_2d(block_size, cfg.focus.kaiser_beta).reshape(
+        1, 1, block_size, block_size
+    )
 
     image_maker = hydra.utils.instantiate(cfg.focus.image_maker)
     center_finder = hydra.utils.instantiate(cfg.focus.center_finder)
 
-    return {
-        "obs": obs,
-        "rx": rx,
+    proj = Local2D.from_geodetic(
+        float(np.mean(lat_limits)),
+        float(np.mean(lon_limits)),
+        float(np.median(heights)),
+    )
+
+    spectral_cfg = SpectralConfig(
+        obs=obs,
+        rx=rx,
+        image_maker=image_maker,
+        tec_name=cfg.focus.tec_name,
+        block_shape=(block_size, block_size),
+        block_step=cfg.focus.block_step,
+        window=window,
+        logscale_objective=cfg.focus.logscale_objective,
+        lat_limits=lat_limits,
+        lon_limits=lon_limits,
+        proj=proj,
+    )
+    orchestration_kwargs = {
         "window_size": cfg.sample.window,
         "step": cfg.sample.step,
-        "image_maker": image_maker,
         "center_finder": center_finder,
         "heights": heights,
-        "block_shape": (block_size, block_size),
-        "block_step": cfg.focus.block_step,
-        "window": window,
-        "logscale_objective": cfg.focus.logscale_objective,
         "n_jobs": cfg.focus.n_jobs,
-        "tec_name": cfg.focus.tec_name,
-        "lat_limits": lat_limits,
-        "lon_limits": lon_limits,
         "time_window": cfg.focus.time_window,
         "density_thresh": cfg.focus.density_thresh,
     }
+    return spectral_cfg, orchestration_kwargs
 
 
 @hydra.main(config_path="conf", config_name="config", version_base=None)
@@ -89,12 +105,15 @@ def main(cfg: DictConfig):
         )
         logger.info("loaded %d observations from %d receivers", len(obs), len(rx))
 
-        kwargs = _build_pipeline_kwargs(obs, rx, cfg, lat_limits, lon_limits)
+        spectral_cfg, orchestration_kwargs = _build_pipeline_inputs(
+            obs, rx, cfg, lat_limits, lon_limits
+        )
 
         logger.info(
-            "starting run_spectral_focusing (time_window=%d)", kwargs["time_window"]
+            "starting run_spectral_focusing (time_window=%d)",
+            orchestration_kwargs["time_window"],
         )
-        result = run_spectral_focusing(**kwargs)
+        result = run_spectral_focusing(spectral_cfg, **orchestration_kwargs)
 
         logger.info("saving results to %s", cfg.output_fn)
         result.to_netcdf(cfg.output_fn)

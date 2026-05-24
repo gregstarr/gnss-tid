@@ -1,25 +1,23 @@
 import logging
-from typing import Protocol
+from abc import ABC, abstractmethod
+from typing import Any
 
 import numpy as np
 import xarray
+from joblib import Parallel, delayed
 from metpy import interpolate as mtpi
 from scipy.interpolate import RBFInterpolator
 from skimage import filters
 from sklearn.metrics import pairwise_distances
 
+from .coords import Local2D
+from .parallel_logging import log_queue_listener, worker_logger
+from .pointdata import get_data
+
 logger = logging.getLogger(__name__)
 
 
-class ImageMaker(Protocol):
-    def __call__(
-        self, x: np.ndarray, y: np.ndarray, tec: np.ndarray
-    ) -> xarray.DataArray: ...
-    def initialize(self, x: np.ndarray, y: np.ndarray): ...
-    def get_data_density(self, x, y, threshold) -> xarray.DataArray: ...
-
-
-class MetpyImageMaker:
+class ImageMakerBase(ABC):
     def __init__(self, hres, hp_freq=0.05, neighbor_radius=100, **kwargs):
         self.kwargs = kwargs
         self.hp_freq = hp_freq
@@ -29,9 +27,56 @@ class MetpyImageMaker:
         self.shape = None
         self.xp = None
         self.yp = None
+        self.area: float | None = None
 
-    def initialize(self, x: np.ndarray, y: np.ndarray):
-        boundary_coords = mtpi.grid.get_boundary_coords(x, y)
+    def initialize_from_bounds(
+        self,
+        proj: Local2D,
+        lat_limits: tuple[float, float],
+        lon_limits: tuple[float, float],
+        n_perim: int = 21,
+    ) -> None:
+        """Initialize the interpolation grid from geodetic bounds.
+
+        Projects a dense perimeter of the lat/lon box through ``proj`` (the
+        same local-cartesian frame the data will be projected into) and takes
+        the cartesian bounding box of the projected perimeter as the grid
+        extent.
+
+        Args:
+            proj: Shared local-cartesian projection; pass the same instance
+                used by :func:`gnss_tid.pointdata.get_data` so the grid and
+                the data are guaranteed to live in the same frame.
+            lat_limits: ``(min_lat, max_lat)`` of the region of interest.
+            lon_limits: ``(min_lon, max_lon)`` of the region of interest.
+            n_perim: Number of samples per lat/lon edge.  Larger values give a
+                tighter bounding box when the projection curves noticeably.
+        """
+        lat_edge = np.linspace(lat_limits[0], lat_limits[1], n_perim)
+        lon_edge = np.linspace(lon_limits[0], lon_limits[1], n_perim)
+        perim_lat = np.concatenate(
+            [
+                np.full(n_perim, lat_limits[0]),
+                lat_edge,
+                np.full(n_perim, lat_limits[1]),
+                lat_edge,
+            ]
+        )
+        perim_lon = np.concatenate(
+            [
+                lon_edge,
+                np.full(n_perim, lon_limits[1]),
+                lon_edge,
+                np.full(n_perim, lon_limits[0]),
+            ]
+        )
+        x, y = proj.convert_from_spherical(perim_lat, perim_lon)
+        boundary_coords = {
+            "west": float(x.min()),
+            "east": float(x.max()),
+            "south": float(y.min()),
+            "north": float(y.max()),
+        }
         for k, v in boundary_coords.items():
             logger.info("image boundary %s: %.2f", k, v)
         x_grid, y_grid = mtpi.grid.generate_grid(self.hres, boundary_coords)
@@ -39,81 +84,153 @@ class MetpyImageMaker:
         self.shape = x_grid.shape
         self.xp = x_grid[0]
         self.yp = y_grid[:, 0]
+        self.area = float(
+            (boundary_coords["east"] - boundary_coords["west"])
+            * (boundary_coords["north"] - boundary_coords["south"])
+        )
 
-    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray:
+    @abstractmethod
+    def _interpolate(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> np.ndarray:
+        """Return interpolated values at ``self.points`` as a flat array."""
+
+    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.Dataset:
         if self.points is None:
-            logger.warning("ImageMaker not initialized. Initializing from first inputs.")
-            self.initialize(x, y)
+            raise RuntimeError(
+                "ImageMaker not initialized; call initialize_from_bounds() first"
+            )
 
-        pts = np.column_stack((x, y))
-        img = mtpi.interpolate_to_points(pts, tec, self.points, **self.kwargs)
-        img = img.reshape(self.shape)
-
+        img = self._interpolate(x, y, tec).reshape(self.shape)
         img[np.isnan(img)] = 0
         img = filters.butterworth(img, self.hp_freq, high_pass=True)
         img = xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
         w = self.get_data_density(x, y, self.neighbor_radius)
         return xarray.Dataset({"image": img, "density": w})
 
-    def get_data_density(self, x, y, threshold):
+    def get_data_density(
+        self, x: np.ndarray, y: np.ndarray, threshold: float
+    ) -> xarray.DataArray:
         pd = pairwise_distances(self.points, np.column_stack((x, y)))
         n = np.sum(pd < threshold, axis=1)
         w = n.reshape(self.shape)
         return xarray.DataArray(w, coords=[self.yp, self.xp], dims=["y", "x"])
 
 
-class ScipyRbfImageMaker:
-    def __init__(self, hres, hp_freq=0.05, neighbor_radius=100, **kwargs):
-        self.kwargs = kwargs
-        self.hp_freq = hp_freq
-        self.hres = hres
-        self.neighbor_radius = neighbor_radius
-        self.points = None
-        self.shape = None
-        self.xp = None
-        self.yp = None
+class MetpyImageMaker(ImageMakerBase):
+    def _interpolate(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> np.ndarray:
+        pts = np.column_stack((x, y))
+        return mtpi.interpolate_to_points(pts, tec, self.points, **self.kwargs)
 
-    def initialize(self, x: np.ndarray, y: np.ndarray, boundary_coords=None):
-        if boundary_coords is None:
-            boundary_coords = mtpi.grid.get_boundary_coords(x, y)
-        for k, v in boundary_coords.items():
-            logger.info("image boundary %s: %.2f", k, v)
-        x_grid, y_grid = mtpi.grid.generate_grid(self.hres, boundary_coords)
-        self.points = mtpi.grid.generate_grid_coords(x_grid, y_grid)
-        self.shape = x_grid.shape
-        self.xp = x_grid[0]
-        self.yp = y_grid[:, 0]
-        # matches legacy rbf by default
-        if "epsilon" not in self.kwargs:
-            edges = np.array(
-                [
-                    boundary_coords["east"] - boundary_coords["west"],
-                    boundary_coords["north"] - boundary_coords["south"],
-                ]
-            )
-            self.kwargs["epsilon"] = 1 / np.power(np.prod(edges) / len(x), 0.5)
-            logger.info("computed epsilon: %.2f", self.kwargs["epsilon"])
 
-    def __call__(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> xarray.DataArray:
-        if self.points is None:
-            logger.warning("ImageMaker not initialized. Initializing from first inputs.")
-            self.initialize(x, y)
-
+class ScipyRbfImageMaker(ImageMakerBase):
+    def _interpolate(self, x: np.ndarray, y: np.ndarray, tec: np.ndarray) -> np.ndarray:
         fin = np.isfinite(tec)
         pts = np.column_stack((x, y))[fin]
-        rbf = RBFInterpolator(pts, tec[fin], **self.kwargs)
+        kwargs = dict(self.kwargs)
+        if "epsilon" not in kwargs:
+            if self.area is None:
+                raise RuntimeError(
+                    "ScipyRbfImageMaker.area is unset; call initialize() or "
+                    "initialize_from_bounds() before __call__, or set "
+                    "`epsilon` in the constructor kwargs"
+                )
+            kwargs["epsilon"] = 1 / np.sqrt(self.area / len(pts))
+        rbf = RBFInterpolator(pts, tec[fin], **kwargs)
+        return rbf(self.points)
 
-        img = rbf(self.points)
-        img = img.reshape(self.shape)
 
-        img[np.isnan(img)] = 0
-        img = filters.butterworth(img, self.hp_freq, high_pass=True)
-        img = xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
-        w = self.get_data_density(x, y, self.neighbor_radius)
-        return xarray.Dataset({"image": img, "density": w})
+def generate_image(
+    obs: Any,
+    rx: Any,
+    ts: Any,
+    time: Any,
+    height: float,
+    image_maker: ImageMakerBase,
+    tec_name: str,
+    lat_limits: tuple[float, float],
+    lon_limits: tuple[float, float],
+    proj: Local2D,
+    log_queue: Any | None = None,
+) -> xarray.Dataset | None:
+    """Build an image for one time window at one fixed height.
 
-    def get_data_density(self, x, y, threshold):
-        pd = pairwise_distances(self.points, np.column_stack((x, y)))
-        n = np.sum(pd < threshold, axis=1)
-        w = n.reshape(self.shape)
-        return xarray.DataArray(w, coords=[self.yp, self.xp], dims=["y", "x"])
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        ts: Time window (``TimeWindow`` or ``(start, stop)`` tuple).
+        time: Start timestamp; used as the ``time`` coordinate.
+        height: IPP height (km) at which to evaluate this slice.
+        image_maker: Initialized image maker.
+        tec_name: Name of the TEC variable in the observation data.
+        lat_limits: ``(min_lat, max_lat)`` bounds for data retrieval.
+        lon_limits: ``(min_lon, max_lon)`` bounds for data retrieval.
+        proj: Shared local-cartesian projection; must be the same instance
+            used to initialize ``image_maker`` so the data and grid align.
+        log_queue: Optional multiprocessing queue for worker logging.
+
+    Returns:
+        A ``Dataset`` with variables ``image (x, y)`` and ``density (x, y)``
+        expanded along ``time``, plus a ``height`` scalar coord, or ``None``
+        if data retrieval failed.
+    """
+    with worker_logger(log_queue) as wlog:
+        wlog.info("[%03d-%03d]: height = %.1f", ts.start, ts.stop, height)
+        data = get_data(obs, rx, ts, height, lat_limits, lon_limits, proj=proj)
+        if data is None:
+            wlog.warning("[%03d-%03d]: FAIL", ts.start, ts.stop)
+            return None
+        img = image_maker(
+            data["x"].values, data["y"].values, data[tec_name].values
+        )
+        return img.expand_dims(time=[time]).assign_coords(height=("time", [height]))
+
+
+def generate_image_stack(
+    obs: Any,
+    rx: Any,
+    image_maker: ImageMakerBase,
+    time_windows: list,
+    times: list,
+    heights: float | np.ndarray,
+    tec_name: str,
+    lat_limits: tuple[float, float],
+    lon_limits: tuple[float, float],
+    proj: Local2D,
+    n_jobs: int,
+) -> xarray.Dataset:
+    """Run :func:`generate_image` over many time windows in parallel.
+
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        image_maker: Initialized image maker (see
+            :meth:`ImageMakerBase.initialize_from_bounds`).
+        time_windows: Sequence of time windows produced by
+            :func:`gnss_tid.pointdata.make_time_windows`.
+        times: Start timestamps aligned with ``time_windows``.
+        heights: Either a scalar IPP height (km, applied to every window) or
+            a 1-D array of length ``len(time_windows)`` giving a per-window
+            height.
+        tec_name: Name of the TEC variable in the observation data.
+        lat_limits: ``(min_lat, max_lat)`` bounds for data retrieval.
+        lon_limits: ``(min_lon, max_lon)`` bounds for data retrieval.
+        proj: Shared local-cartesian projection; must match the one used to
+            initialize ``image_maker``.
+        n_jobs: Number of parallel worker processes.
+
+    Returns:
+        A ``Dataset`` concatenated along ``time`` with variables ``image``,
+        ``density``, and ``height(time)``.  Failed slices are dropped.
+    """
+    height_arr = np.broadcast_to(np.asarray(heights), (len(time_windows),))
+    with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
+        results = parallel(
+            delayed(generate_image)(
+                obs, rx, ts, time, float(h), image_maker, tec_name,
+                lat_limits, lon_limits, proj, q,
+            )
+            for ts, time, h in zip(time_windows, times, height_arr, strict=True)
+        )
+    valid = [r for r in results if r is not None]
+    if not valid:
+        raise RuntimeError("image generation produced no valid slices")
+    return xarray.concat(valid, dim="time")
