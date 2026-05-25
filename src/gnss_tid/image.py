@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import xarray
 from joblib import Parallel, delayed
 from metpy import interpolate as mtpi
@@ -12,7 +13,7 @@ from sklearn.metrics import pairwise_distances
 
 from .coords import Local2D
 from .parallel_logging import log_queue_listener, worker_logger
-from .pointdata import get_data
+from .pointdata import TimeWindow, get_data
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +140,30 @@ class ScipyRbfImageMaker(ImageMakerBase):
 
 
 def generate_image(
-    obs: Any,
-    rx: Any,
-    ts: Any,
-    time: Any,
+    data: pd.DataFrame,
+    image_maker: ImageMakerBase,
+    tec_name: str,
+) -> xarray.Dataset:
+    """Interpolate a pre-fetched slice onto the image-maker's grid.
+
+    Args:
+        data: DataFrame already projected into the image_maker's frame; must
+            contain ``x``, ``y``, and ``tec_name`` columns.
+        image_maker: Initialized image maker.
+        tec_name: Name of the TEC column in ``data``.
+
+    Returns:
+        A ``Dataset`` with variables ``image (y, x)`` and ``density (y, x)``.
+    """
+    return image_maker(
+        data["x"].values, data["y"].values, data[tec_name].values
+    )
+
+
+def _build_image_for_slice(
+    obs: pd.DataFrame,
+    rx: pd.DataFrame,
+    ts: TimeWindow,
     height: float,
     image_maker: ImageMakerBase,
     tec_name: str,
@@ -151,45 +172,28 @@ def generate_image(
     proj: Local2D,
     log_queue: Any | None = None,
 ) -> xarray.Dataset | None:
-    """Build an image for one time window at one fixed height.
+    """Fetch one time window and build its image at the given height.
 
-    Args:
-        obs: Observation DataFrame.
-        rx: Receiver lookup DataFrame.
-        ts: Time window (``TimeWindow`` or ``(start, stop)`` tuple).
-        time: Start timestamp; used as the ``time`` coordinate.
-        height: IPP height (km) at which to evaluate this slice.
-        image_maker: Initialized image maker.
-        tec_name: Name of the TEC variable in the observation data.
-        lat_limits: ``(min_lat, max_lat)`` bounds for data retrieval.
-        lon_limits: ``(min_lon, max_lon)`` bounds for data retrieval.
-        proj: Shared local-cartesian projection; must be the same instance
-            used to initialize ``image_maker`` so the data and grid align.
-        log_queue: Optional multiprocessing queue for worker logging.
-
-    Returns:
-        A ``Dataset`` with variables ``image (x, y)`` and ``density (x, y)``
-        expanded along ``time``, plus a ``height`` scalar coord, or ``None``
-        if data retrieval failed.
+    Returns a ``Dataset`` expanded along ``time`` (= ``ts.start_time``) with a
+    ``height`` coord, or ``None`` if data retrieval failed.
     """
     with worker_logger(log_queue) as wlog:
-        wlog.info("[%03d-%03d]: height = %.1f", ts.start, ts.stop, height)
+        wlog.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
         data = get_data(obs, rx, ts, height, lat_limits, lon_limits, proj=proj)
         if data is None:
-            wlog.warning("[%03d-%03d]: FAIL", ts.start, ts.stop)
+            wlog.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
             return None
-        img = image_maker(
-            data["x"].values, data["y"].values, data[tec_name].values
+        img = generate_image(data, image_maker, tec_name)
+        return img.expand_dims(time=[ts.start_time]).assign_coords(
+            height=("time", [height])
         )
-        return img.expand_dims(time=[time]).assign_coords(height=("time", [height]))
 
 
 def generate_image_stack(
-    obs: Any,
-    rx: Any,
+    obs: pd.DataFrame,
+    rx: pd.DataFrame,
     image_maker: ImageMakerBase,
-    time_windows: list,
-    times: list,
+    time_windows: list[TimeWindow],
     heights: float | np.ndarray,
     tec_name: str,
     lat_limits: tuple[float, float],
@@ -197,7 +201,7 @@ def generate_image_stack(
     proj: Local2D,
     n_jobs: int,
 ) -> xarray.Dataset:
-    """Run :func:`generate_image` over many time windows in parallel.
+    """Build an image for each time window in parallel.
 
     Args:
         obs: Observation DataFrame.
@@ -206,7 +210,6 @@ def generate_image_stack(
             :meth:`ImageMakerBase.initialize_from_bounds`).
         time_windows: Sequence of time windows produced by
             :func:`gnss_tid.pointdata.make_time_windows`.
-        times: Start timestamps aligned with ``time_windows``.
         heights: Either a scalar IPP height (km, applied to every window) or
             a 1-D array of length ``len(time_windows)`` giving a per-window
             height.
@@ -224,11 +227,11 @@ def generate_image_stack(
     height_arr = np.broadcast_to(np.asarray(heights), (len(time_windows),))
     with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
         results = parallel(
-            delayed(generate_image)(
-                obs, rx, ts, time, float(h), image_maker, tec_name,
+            delayed(_build_image_for_slice)(
+                obs, rx, ts, float(h), image_maker, tec_name,
                 lat_limits, lon_limits, proj, q,
             )
-            for ts, time, h in zip(time_windows, times, height_arr, strict=True)
+            for ts, h in zip(time_windows, height_arr, strict=True)
         )
     valid = [r for r in results if r is not None]
     if not valid:

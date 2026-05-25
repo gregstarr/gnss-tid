@@ -52,7 +52,7 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         rx=rx,
         image_maker=image_maker,
         tec_name=cfg.focus.tec_name,
-        block_shape=(block_size, block_size),
+        block_size=block_size,
         block_step=cfg.focus.block_step,
         window=window,
         logscale_objective=cfg.focus.logscale_objective,

@@ -1,4 +1,5 @@
-_target_: gnss_tid.radial.CenterFinder
+_target_: gnss_tid.center_finding.run_correlation_center_finder
+_partial_: true
 max_iter: 1500
 learning_rate: 1.0
 improvement: 1.0e-05

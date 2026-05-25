@@ -53,7 +53,7 @@ def make_patches(
     FFT is **not** done here — the caller controls it via the ``s=`` argument
     of ``fft2``; this matches both
     :func:`gnss_tid.parameter.estimate_parameters_block`'s ``Nfft`` parameter
-    and :func:`gnss_tid.spectral.get_fft_patches`'s implicit
+    and :func:`gnss_tid.spectral.compute_patch_spectra`'s implicit
     ``Nfft = block_size``.
 
     Dask: works transparently with dask-backed DataArrays because

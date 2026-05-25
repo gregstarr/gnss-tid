@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import xarray
 from joblib import Parallel, delayed
 from matplotlib import pyplot as plt
@@ -13,9 +14,10 @@ from scipy.fft import fft2
 from .center_finding import run_smoothed_center_finder
 from .coords import Local2D
 from .fft import make_patches, make_wavenum_grid
+from .image import ImageMakerBase, generate_image
 from .parallel_logging import log_queue_listener, worker_logger
 from .plotting import plot_center_finder
-from .pointdata import get_data, make_time_windows
+from .pointdata import TimeWindow, get_data, make_time_windows
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +31,11 @@ class SpectralConfig:
     be safely shared across processes.
     """
 
-    obs: Any
-    rx: Any
-    image_maker: Any
+    obs: pd.DataFrame
+    rx: pd.DataFrame
+    image_maker: ImageMakerBase
     tec_name: str
-    block_shape: tuple[int, int]
+    block_size: int
     block_step: int
     window: np.ndarray
     logscale_objective: bool
@@ -42,9 +44,9 @@ class SpectralConfig:
     proj: Local2D
 
 
-def get_fft_patches(
+def compute_patch_spectra(
     img: xarray.DataArray,
-    block_shape: tuple[int, int],
+    block_size: int,
     hres: float,
     block_step: int,
     window: xarray.DataArray,
@@ -58,11 +60,11 @@ def get_fft_patches(
 
     Args:
         img: Input image ``DataArray`` with dims ``(x, y)``.
-        block_shape: ``(ny, nx)`` size of each FFT block.
+        block_size: Edge length (pixels) of each square FFT block.
         hres: Horizontal resolution of the image (km per pixel); used to set
             wavenumber coordinates.
         block_step: Stride (in pixels) between consecutive block centres.
-        window: FFT windowing array of shape ``(1, 1, ny, nx)``.
+        window: FFT windowing array of shape ``(1, 1, block_size, block_size)``.
         logscale_objective: If ``True``, patch power is log10-transformed.
 
     Returns:
@@ -70,8 +72,8 @@ def get_fft_patches(
         ``(px, py, kx, ky)`` where ``px``, ``py`` are spatial patch centres
         and ``kx``, ``ky`` are wavenumbers (cycles km⁻¹).
     """
-    wavenum = make_wavenum_grid(block_shape[0], hres)
-    patches = make_patches(img, block_shape[0], block_step).assign_coords(
+    wavenum = make_wavenum_grid(block_size, hres)
+    patches = make_patches(img, block_size, block_step).assign_coords(
         kx=wavenum, ky=wavenum
     )
     patches.values = abs(fft2(patches * window)) ** 2
@@ -81,7 +83,7 @@ def get_fft_patches(
     return patches
 
 
-def process_patches(patch: xarray.DataArray) -> xarray.Dataset:
+def extract_patch_peaks(patch: xarray.DataArray) -> xarray.Dataset:
     """Summarise an FFT patch array by its spectral peak.
 
     Selects the wavenumber ``(kx, ky)`` of the maximum power at each spatial
@@ -106,8 +108,8 @@ def process_patches(patch: xarray.DataArray) -> xarray.Dataset:
     )
 
 
-def compute_patches_per_height(
-    ts: Any,
+def build_patch_stack(
+    ts: TimeWindow,
     heights: np.ndarray,
     cfg: SpectralConfig,
     wlog: logging.Logger | None = None,
@@ -119,7 +121,7 @@ def compute_patches_per_height(
     chunk of memory when ``len(heights)`` is large.
 
     Args:
-        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        ts: Time window for this slice.
         heights: Array of IPP heights (km) to evaluate.
         cfg: Shared spectral configuration.
         wlog: Optional logger; falls back to module logger.
@@ -132,21 +134,19 @@ def compute_patches_per_height(
         wlog = logger
     patches = []
     for height in heights:
-        wlog.info("[%03d-%03d]: height = %.1f", ts.start, ts.stop, height)
+        wlog.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
-            wlog.warning("[%03d-%03d]: FAIL", ts.start, ts.stop)
+            wlog.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
             return None
-        img = cfg.image_maker(
-            data["x"].values, data["y"].values, data[cfg.tec_name].values
-        )
+        img = generate_image(data, cfg.image_maker, cfg.tec_name)
         patches.append(
-            get_fft_patches(
+            compute_patch_spectra(
                 img.image,
-                cfg.block_shape,
+                cfg.block_size,
                 cfg.image_maker.hres,
                 cfg.block_step,
                 cfg.window,
@@ -156,8 +156,8 @@ def compute_patches_per_height(
     return xarray.concat(patches, "height").assign_coords(height=heights)
 
 
-def process_heights(
-    ts: Any,
+def build_image_patch_stack(
+    ts: TimeWindow,
     heights: np.ndarray,
     cfg: SpectralConfig,
     wlog: logging.Logger | None = None,
@@ -168,7 +168,7 @@ def process_heights(
     so it can return the best height's full slice in one go.
 
     Args:
-        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        ts: Time window for this slice.
         heights: Array of IPP heights (km) to process.
         cfg: Shared spectral configuration.
         wlog: Optional logger; falls back to module logger.
@@ -184,22 +184,20 @@ def process_heights(
     patches = []
     npts = []
     for height in heights:
-        wlog.info("[%03d-%03d]: height = %.1f", ts.start, ts.stop, height)
+        wlog.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
-            wlog.warning("[%03d-%03d]: FAIL", ts.start, ts.stop)
+            wlog.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
             return None
         npts.append(len(data))
-        img = cfg.image_maker(
-            data["x"].values, data["y"].values, data[cfg.tec_name].values
-        )
+        img = generate_image(data, cfg.image_maker, cfg.tec_name)
         patches.append(
-            get_fft_patches(
+            compute_patch_spectra(
                 img.image,
-                cfg.block_shape,
+                cfg.block_size,
                 cfg.image_maker.hres,
                 cfg.block_step,
                 cfg.window,
@@ -215,9 +213,9 @@ def process_heights(
     )
 
 
-def run_spectral_time_slice(
-    ts: Any,
-    time: Any,
+def compute_height_objectives_for_slice(
+    ts: TimeWindow,
+    time: np.datetime64,
     heights: np.ndarray,
     cfg: SpectralConfig,
     log_queue: Any | None = None,
@@ -225,7 +223,7 @@ def run_spectral_time_slice(
     """First-pass worker: return per-height FFT objectives for one time slice.
 
     Args:
-        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        ts: Time window for this slice.
         time: Start timestamp; used as the ``time`` coordinate.
         heights: Array of heights (km) to evaluate.
         cfg: Shared spectral configuration.
@@ -236,16 +234,16 @@ def run_spectral_time_slice(
         or ``None`` if data retrieval failed for any height.
     """
     with worker_logger(log_queue) as wlog:
-        wlog.info("[%03d-%03d]: processing heights", ts.start, ts.stop)
-        patches = compute_patches_per_height(ts, heights, cfg, wlog=wlog)
+        wlog.info("[%s-%s]: processing heights", ts.start_time, ts.end_time)
+        patches = build_patch_stack(ts, heights, cfg, wlog=wlog)
         if patches is None:
             return None
-        return process_patches(patches).objective.expand_dims(time=[time])
+        return extract_patch_peaks(patches).objective.expand_dims(time=[time])
 
 
-def _process_single_slice(
-    ts: Any,
-    time: Any,
+def _select_best_height_for_slice(
+    ts: TimeWindow,
+    time: np.datetime64,
     heights: np.ndarray,
     cfg: SpectralConfig,
     log_queue: Any | None = None,
@@ -256,10 +254,10 @@ def _process_single_slice(
     height with the maximum objective, and returns the data at that height
     together with the per-height objective surface.  The returned slice
     already contains ``F``, ``Fx``, ``Fy``, and ``objective``, so no further
-    ``process_patches`` call is needed downstream.
+    ``extract_patch_peaks`` call is needed downstream.
 
     Args:
-        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        ts: Time window for this slice.
         time: Start timestamp; used as the ``time`` coordinate.
         heights: Array of IPP heights (km) to evaluate.
         cfg: Shared spectral configuration.
@@ -276,11 +274,11 @@ def _process_single_slice(
         Returns ``None`` if data retrieval failed for any height.
     """
     with worker_logger(log_queue) as wlog:
-        wlog.info("[%03d-%03d]: single-pass slice", ts.start, ts.stop)
-        data_all = process_heights(ts, heights, cfg, wlog=wlog)
+        wlog.info("[%s-%s]: single-pass slice", ts.start_time, ts.end_time)
+        data_all = build_image_patch_stack(ts, heights, cfg, wlog=wlog)
         if data_all is None:
             return None
-        summary = process_patches(data_all.patch)
+        summary = extract_patch_peaks(data_all.patch)
         best_idx = int(summary.objective.argmax())
         best_height = float(heights[best_idx])
         best_slice = (
@@ -294,9 +292,9 @@ def _process_single_slice(
         return best_slice, obj_da
 
 
-def _process_focused_slice(
-    ts: Any,
-    time: Any,
+def _rebuild_slice_at_height(
+    ts: TimeWindow,
+    time: np.datetime64,
     height: float,
     cfg: SpectralConfig,
     log_queue: Any | None = None,
@@ -304,7 +302,7 @@ def _process_focused_slice(
     """Second-pass worker: rebuild image and patch at a fixed focus height.
 
     Args:
-        ts: Time window (``TimeWindow`` or ``(start, end)`` tuple).
+        ts: Time window for this slice.
         time: Start timestamp; used as the ``time`` coordinate.
         height: IPP height (km) at which to evaluate this time slice.
         cfg: Shared spectral configuration.
@@ -322,12 +320,10 @@ def _process_focused_slice(
         )
         if data is None:
             return None
-        img = cfg.image_maker(
-            data["x"].values, data["y"].values, data[cfg.tec_name].values
-        )
-        p = get_fft_patches(
+        img = generate_image(data, cfg.image_maker, cfg.tec_name)
+        p = compute_patch_spectra(
             img.image,
-            cfg.block_shape,
+            cfg.block_size,
             cfg.image_maker.hres,
             cfg.block_step,
             cfg.window,
@@ -367,7 +363,7 @@ def _build_sparse_image(
     )
 
 
-def _run_single_pass_focusing(
+def _focus_per_slice(
     time_windows: list,
     times: list,
     heights: np.ndarray,
@@ -377,7 +373,7 @@ def _run_single_pass_focusing(
     """Run the single-pass focusing branch and return the per-time best slice.
 
     Each worker selects the best height for its window and returns the
-    corresponding image plus patch summary; no further ``process_patches``
+    corresponding image plus patch summary; no further ``extract_patch_peaks``
     call is needed downstream.
     """
     logger.info(
@@ -385,7 +381,7 @@ def _run_single_pass_focusing(
     )
     with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
         single_slices = parallel(
-            delayed(_process_single_slice)(ts, time, heights, cfg, q)
+            delayed(_select_best_height_for_slice)(ts, time, heights, cfg, q)
             for ts, time in zip(time_windows, times, strict=True)
         )
 
@@ -401,7 +397,7 @@ def _run_single_pass_focusing(
     return data_focused
 
 
-def _run_two_pass_focusing(
+def _focus_with_time_smoothing(
     time_windows: list,
     times: list,
     heights: np.ndarray,
@@ -416,7 +412,7 @@ def _run_two_pass_focusing(
     )
     with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
         objectives = parallel(
-            delayed(run_spectral_time_slice)(ts, time, heights, cfg, q)
+            delayed(compute_height_objectives_for_slice)(ts, time, heights, cfg, q)
             for ts, time in zip(time_windows, times, strict=True)
         )
 
@@ -451,7 +447,7 @@ def _run_two_pass_focusing(
     )
     with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
         focused_slices = parallel(
-            delayed(_process_focused_slice)(ts, time, height, cfg, q)
+            delayed(_rebuild_slice_at_height)(ts, time, height, cfg, q)
             for ts, time, height in second_pass_inputs
         )
 
@@ -461,7 +457,7 @@ def _run_two_pass_focusing(
 
     data_focused = xarray.concat(valid_slices, "time")
     return (
-        data_focused.merge(process_patches(data_focused.patch))
+        data_focused.merge(extract_patch_peaks(data_focused.patch))
         .reindex(time=focus_height.time)
         .assign(height=focus_height.height)
     )
@@ -546,11 +542,11 @@ def run_spectral_focusing(
     Path("plots").mkdir(exist_ok=True)
 
     if time_window == 1:
-        data_focused = _run_single_pass_focusing(
+        data_focused = _focus_per_slice(
             time_windows, times, heights, cfg, n_jobs
         )
     else:
-        data_focused = _run_two_pass_focusing(
+        data_focused = _focus_with_time_smoothing(
             time_windows, times, heights, cfg, n_jobs, time_window
         )
 

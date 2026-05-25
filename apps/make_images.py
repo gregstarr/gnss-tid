@@ -93,7 +93,6 @@ def main(cfg: DictConfig):
         time_windows = make_time_windows(
             obs["time"], cfg.sample.window, cfg.sample.step
         )
-        times = [w.start_time for w in time_windows]
         logger.info("built %d time windows", len(time_windows))
 
         heights, init_height = _resolve_heights(cfg, time_windows)
@@ -120,7 +119,6 @@ def main(cfg: DictConfig):
             rx=rx,
             image_maker=image_maker,
             time_windows=time_windows,
-            times=times,
             heights=heights,
             tec_name=cfg.tec_name,
             lat_limits=lat_limits,

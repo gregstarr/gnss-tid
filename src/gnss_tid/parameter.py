@@ -85,6 +85,84 @@ KDIMS = ["kx", "ky"]
 TAU = 2 * np.pi
 
 
+def _phase_diff_freq(F_next, F_prev, dt):
+    """Forward-difference instantaneous frequency from time-adjacent spectra."""
+    return np.angle(F_next * np.conj(F_prev)) / (TAU * dt)
+
+
+def _spectral_moments(W, k):
+    """Weighted 0th and 2nd wavenumber moments reduced over the last two axes."""
+    S0 = (W * k * np.conj(k)).sum(axis=(-2, -1)).real
+    S2 = (W * k**2).sum(axis=(-2, -1))
+    return S0, S2
+
+
+def _principal_direction(S2):
+    """Unit vector along the wavenumber principal axis (half-angle of S2)."""
+    return np.exp(1j * np.angle(S2) / 2)
+
+
+def _sign_projection(direction, k):
+    """+/-1 per k-bin: sign of the projection onto ``direction``.
+
+    xarray broadcasts ``direction`` against ``k`` by dim name; raw numpy/dask
+    arrays need explicit trailing (ky, kx) axes on ``direction``.
+    """
+    if isinstance(direction, xr.DataArray):
+        return np.sign((direction * np.conj(k)).real)
+    return np.sign((direction[..., None, None] * np.conj(k)).real)
+
+
+def _period_from_freq(wmean_freq, max_period_min):
+    """Period in minutes; masks ``freq <= 0`` and ``period > max_period_min``."""
+    period = 1 / (60 * wmean_freq)
+    mask = (wmean_freq > 0) & (period <= max_period_min)
+    if isinstance(wmean_freq, xr.DataArray):
+        return period.where(mask)
+    xp = da if isinstance(wmean_freq, da.Array) else np
+    return xp.where(mask, period, xp.nan)
+
+
+def _phase_velocity(wmean_wavevector, wmean_freq):
+    """Complex phase velocity (m/s): unit-direction * (f / |k|)."""
+    d = wmean_wavevector / abs(wmean_wavevector)
+    return 1000 * d * wmean_freq / abs(wmean_wavevector)
+
+
+def _wmean_freq(W, freq, m):
+    """Weighted-mean frequency magnitude with directional sign projection."""
+    return abs((W * freq * m).sum(axis=(-2, -1)))
+
+
+def _finite_or_nan(x):
+    """Replace non-finite values with NaN, preserving array backend."""
+    if isinstance(x, xr.DataArray):
+        return x.where(np.isfinite(x))
+    xp = da if isinstance(x, da.Array) else np
+    return xp.where(xp.isfinite(x), x, xp.nan)
+
+
+def _rolling_freq_stats(freq, win, axis_or_dim):
+    """Centered rolling nan-mean and nan-std along time.
+
+    Pass a dim name for xarray inputs (uses ``rolling`` with ``min_periods=1``);
+    pass an integer axis for raw numpy/dask inputs (uses pad + sliding window
+    so the output length matches forward-diff input + 1).
+    """
+    if isinstance(freq, xr.DataArray):
+        rolling = freq.rolling({axis_or_dim: win}, center=True, min_periods=1)
+        return rolling.mean(), rolling.std()
+    pad = [(0, 0)] * freq.ndim
+    pad[axis_or_dim] = ((win - 1) // 2, (win - 1) // 2 + 1)
+    if isinstance(freq, da.Array):
+        padded = da.pad(freq, pad, mode="constant", constant_values=da.nan)
+        windows = da.overlap.sliding_window_view(padded, win, axis_or_dim, False)
+        return da.nanmean(windows, -1), da.nanstd(windows, -1)
+    padded = np.pad(freq, pad, mode="constant", constant_values=np.nan)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, win, axis_or_dim)
+    return np.nanmean(windows, -1), np.nanstd(windows, -1)
+
+
 def estimate_parameters_block(
     data: xr.Dataset,
     *,
@@ -153,14 +231,12 @@ def estimate_parameters_block(
     del img_patches
 
     power = abs(F) ** 2
-    # forward-difference frequency estimate
-    freq_pairs = F.isel(time=slice(1, None))
+    F_next = F.isel(time=slice(1, None))
     freq = xr.DataArray(
-        np.angle(freq_pairs.data * F.isel(time=slice(None, -1)).data.conj())
-        / (TAU * dt.data),
-        coords=freq_pairs.coords,
+        _phase_diff_freq(F_next.data, F.isel(time=slice(None, -1)).data, dt.data),
+        coords=F_next.coords,
     )
-    del F, freq_pairs
+    del F, F_next
 
     # weighted average: keep only k bins with power exceeding the q_threshold
     power_threshold = power.quantile(q_threshold, KDIMS).drop_vars("quantile")
@@ -168,21 +244,16 @@ def estimate_parameters_block(
     W = W / W.sum(KDIMS)
 
     freq = freq.reindex(time=data.time)
-    freq_std = freq.rolling(time=smooth_win, center=True, min_periods=1).std()
-    freq = freq.rolling(time=smooth_win, center=True, min_periods=1).mean()
-    freq_snr = 1 / (freq_std * W).sum(KDIMS)
+    freq, freq_std = _rolling_freq_stats(freq, smooth_win, "time")
+    freq_snr = _finite_or_nan(1 / (freq_std * W).sum(KDIMS))
 
     k = W.kx + W.ky * 1j
-    k2 = k**2
-    S0 = (W * k * k.conj()).sum(KDIMS).real
-    S2 = (W * k2).sum(KDIMS)
+    S0, S2 = _spectral_moments(W, k)
     e2 = (S0 - abs(S2)) / 2
     wavelength_snr = 1 / np.sqrt(e2)
-    direction = np.exp(1j * xr.ufuncs.angle(S2) / 2)
-
-    # positive / negative projection from phase velocity direction
-    m = np.sign((direction * k.conj()).real)
-    wmean_freq = abs((W * freq * m).sum(KDIMS))
+    direction = _principal_direction(S2)
+    m = _sign_projection(direction, k)
+    wmean_freq = _wmean_freq(W, freq, m)
     wmean_wavevector = (W * k * m).sum(KDIMS)
 
     group_velocity = (
@@ -217,13 +288,11 @@ def estimate_parameters_block(
         / (2 * kres)
     )  # m/s
 
-    d = wmean_wavevector / abs(wmean_wavevector)
-    phase_velocity = 1000 * d * wmean_freq / abs(wmean_wavevector)  # m/s
+    phase_velocity = _phase_velocity(wmean_wavevector, wmean_freq)  # m/s
 
     # arbitrarily setting max period to 2x length of data interval
     max_period = 2 * (data.time[-1] - data.time[0]).dt.total_seconds() / 60  # minutes
-    period = 1 / (60 * wmean_freq)  # minutes
-    period = period.where((wmean_freq > 0) & (period <= max_period))
+    period = _period_from_freq(wmean_freq, max_period)  # minutes
     wavelength = 1 / abs(wmean_wavevector)  # km
 
     return xr.Dataset(
@@ -363,48 +432,30 @@ def estimate_parameters_dask(
     power_threshold = power_threshold[..., 0, 0]
 
     k = da.expand_dims(wavenum[None, :] + 1j * wavenum[:, None], axis=(0, 1, 2, 3))
-    k2 = k**2
-    S0 = da.sum(W * k * da.conj(k), axis=(-2, -1)).real
-    S2 = da.sum(W * k2, axis=(-2, -1))
+    S0, S2 = _spectral_moments(W, k)
     log_ntasks("S2", S2)
-    direction = da.exp(1j * da.angle(S2) / 2)
+    direction = _principal_direction(S2)
     log_ntasks("direction", direction)
 
-    # positive / negative projection from S2
-    m = da.sign((da.expand_dims(direction, axis=(4, 5)) * k.conj()).real)
+    m = _sign_projection(direction, k)
     log_ntasks("m", m)
-    wmean_wavevector = da.sum(W * k * m, axis=(-2, -1))
+    wmean_wavevector = (W * k * m).sum(axis=(-2, -1))
     log_ntasks("weighted mean wavevector", wmean_wavevector)
 
-    # forward difference phase derivative estimate
-    freq = da.angle(F[:, 1:] * da.conj(F[:, :-1])) / (TAU * dt)
+    freq = _phase_diff_freq(F[:, 1:], F[:, :-1], dt)
     log_ntasks("freq", freq)
-    # need extra pad at back because difference lost us 1 element
-    padding = 6 * [(0, 0)]
-    padding[1] = ((smooth_win - 1) // 2, (smooth_win - 1) // 2 + 1)
-    freq = da.pad(freq, padding, mode="constant", constant_values=da.nan)
-    log_ntasks("pad f", freq)
-
-    f_windows = da.overlap.sliding_window_view(freq, smooth_win, 1, False)
-    log_ntasks("window f", f_windows)
-    freq = da.nanmean(f_windows, -1)
-    log_ntasks("window freq mean", freq)
-    freq_snr = da.nanstd(f_windows, -1)
-    log_ntasks("freq std", freq_snr)
-    freq_snr = 1 / da.sum(freq_snr * W, axis=(-2, -1))
-    log_ntasks("freq std weighted mean", freq_snr)
-    freq_snr = da.where(da.isfinite(freq_snr), freq_snr, da.nan)
-    log_ntasks("freq std filter", freq_snr)
-    wmean_freq = da.sum(abs(W * freq * m), axis=(-2, -1))
+    freq, freq_std = _rolling_freq_stats(freq, smooth_win, 1)
+    log_ntasks("freq smoothed", freq)
+    freq_snr = _finite_or_nan(1 / (freq_std * W).sum(axis=(-2, -1)))
+    log_ntasks("freq snr", freq_snr)
+    wmean_freq = _wmean_freq(W, freq, m)
     log_ntasks("weighted mean freq", wmean_freq)
-    period = 1 / (60 * wmean_freq)  # minutes
-    period = da.where((wmean_freq > 0) & (period <= max_period), period, da.nan)
+    period = _period_from_freq(wmean_freq, max_period)
     log_ntasks("period", period)
     wavelength = 1 / abs(wmean_wavevector)  # km
     log_ntasks("wavelength", wavelength)
 
-    d = wmean_wavevector / abs(wmean_wavevector)
-    phase_velocity = 1000 * d * wmean_freq / abs(wmean_wavevector)  # m/s
+    phase_velocity = _phase_velocity(wmean_wavevector, wmean_freq)  # m/s
     log_ntasks("phase velocity", phase_velocity)
 
     dims = ["time", "py", "px"]
