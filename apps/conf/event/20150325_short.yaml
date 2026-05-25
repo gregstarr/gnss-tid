@@ -1,6 +1,5 @@
 files:
-  - /disk1/tid/data/2015_0325T0000-0326T0000_all0325.yaml_30el_30s_ra.h5
-  # - /disk1/tid/data/2015_0326T0000-0327T0000_all0326.yaml_30el_30s_ra.h5
+  - /disk1/tid/2015/0325/*.nc
 latitude_limits:
   - 24.0
   - 48.0
@@ -8,7 +7,7 @@ longitude_limits:
   - -120.0
   - -75.0
 time_limits:
-  - "20150325_234600"
+  - "20150325_234000"
   - "20150325_235000"
 el_min: 30
 q_thresh: 0.99

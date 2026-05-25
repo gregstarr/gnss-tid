@@ -35,10 +35,6 @@ dependencies = [
     "zarr>3",
 ]
 
-[project.scripts]
-autofocus = "gnss_tid.main:main"
-param = "gnss_tid.run_estimator:main"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
