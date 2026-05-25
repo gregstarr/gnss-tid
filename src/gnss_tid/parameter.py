@@ -5,9 +5,8 @@ import dask
 import dask.array as da
 import numpy as np
 import xarray as xr
-from scipy.fft import fft2, fftshift
 
-from .fft import make_kaiser_2d, make_patches, make_wavenum_grid
+from .fft import fft_patches, make_kaiser_2d, make_patches, make_wavenum_grid
 
 
 def estimate_noise_hs74(spectrum, navg=1, nnoise_min=1):
@@ -215,17 +214,9 @@ def estimate_parameters_block(
             ["kx", "ky"]
         )
 
-    # fftshift shifts all axes by default; apply_ufunc puts input_core_dims at the end
-    F = xr.apply_ufunc(
-        lambda x: fftshift(fft2(x * window, s=(Nfft, Nfft)), axes=(-2, -1)),
-        img_patches,
-        input_core_dims=[KDIMS],
-        output_core_dims=[KDIMS],
-        output_dtypes=[np.complex64],
-        dask_gufunc_kwargs={"output_sizes": {"kx": Nfft, "ky": Nfft}},
-        dask="parallelized",
-        exclude_dims={"kx", "ky"},
-    ).assign_coords(kx=wavenum, ky=wavenum)
+    F = fft_patches(img_patches, window, Nfft=Nfft, shift=True).assign_coords(
+        kx=wavenum, ky=wavenum
+    )
     if dask.is_dask_collection(F):
         F = F.chunk({"time": -1})
     del img_patches
@@ -408,10 +399,7 @@ def estimate_parameters_dask(
         x = da.where(s > 0, x / s, 0)
         log_ntasks("normalize patches", x)
 
-    x = x * window
-    log_ntasks("window", x)
-    logging.debug(x)
-    F = da.fft.fftshift(da.fft.fft2(x, s=(Nfft, Nfft)), axes=(-2, -1))
+    F = fft_patches(x, window, Nfft=Nfft, shift=True)
     log_ntasks("FFT", F)
     logging.debug(F)
     logging.debug(f"FFT chunk size: {np.prod(F.chunksize)*8/(2**20)}MB")

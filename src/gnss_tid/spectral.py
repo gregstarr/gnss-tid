@@ -9,11 +9,10 @@ import pandas as pd
 import xarray
 from joblib import Parallel, delayed
 from matplotlib import pyplot as plt
-from scipy.fft import fft2
 
 from .center_finding import run_smoothed_center_finder
 from .coords import Local2D
-from .fft import make_patches, make_wavenum_grid
+from .fft import fft_patches, make_patches, make_wavenum_grid
 from .image import ImageMakerBase, generate_image
 from .parallel_logging import log_queue_listener, worker_logger
 from .plotting import plot_center_finder
@@ -73,14 +72,13 @@ def compute_patch_spectra(
         and ``kx``, ``ky`` are wavenumbers (cycles km⁻¹).
     """
     wavenum = make_wavenum_grid(block_size, hres)
-    patches = make_patches(img, block_size, block_step).assign_coords(
-        kx=wavenum, ky=wavenum
-    )
-    patches.values = abs(fft2(patches * window)) ** 2
+    patches = make_patches(img, block_size, block_step)
+    F = fft_patches(patches, window, Nfft=block_size)
+    power = (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
     if logscale_objective:
-        patches = np.log10(patches)
+        power = np.log10(power)
 
-    return patches
+    return power
 
 
 def extract_patch_peaks(patch: xarray.DataArray) -> xarray.Dataset:

@@ -7,9 +7,10 @@ wavenumber-grid generation between the two callers.
 
 from collections.abc import Sequence
 
+import dask.array as da
 import numpy as np
 import xarray as xr
-from scipy.fft import fftfreq, fftshift
+from scipy.fft import fft2, fftfreq, fftshift
 from scipy.signal.windows import kaiser
 
 
@@ -101,4 +102,65 @@ def make_wavenum_grid(
     return wavenum.astype(dtype)
 
 
-__all__: Sequence[str] = ["make_kaiser_2d", "make_patches", "make_wavenum_grid"]
+def fft_patches(
+    patches: xr.DataArray | da.Array | np.ndarray,
+    window: np.ndarray,
+    *,
+    Nfft: int,
+    shift: bool = False,
+) -> xr.DataArray | da.Array | np.ndarray:
+    """2-D FFT of windowed patches with optional zero-padding and fftshift.
+
+    Dispatches on input type:
+
+    - ``xr.DataArray``: uses :func:`xarray.apply_ufunc` with
+      ``input_core_dims=[["kx", "ky"]]``, so dim ordering of the input is
+      irrelevant.  Works transparently with dask-backed DataArrays.
+    - ``dask.array.Array`` / ``np.ndarray``: operates on the last two axes;
+      the caller owns axis ordering.
+
+    Output dtype is ``complex64``.
+
+    Args:
+        patches: Patch array with trailing ``(kx, ky)`` axes of length
+            ``block_size``.
+        window: FFT window broadcastable against the trailing two axes
+            of ``patches``.
+        Nfft: FFT length per axis; pads when ``Nfft > block_size``.
+        shift: If True, apply ``fftshift`` along the last two axes
+            (DC at the centre).
+    """
+    if isinstance(patches, xr.DataArray):
+        def _fft(x: np.ndarray) -> np.ndarray:
+            F = fft2(x * window, s=(Nfft, Nfft))
+            if shift:
+                F = fftshift(F, axes=(-2, -1))
+            return F
+
+        return xr.apply_ufunc(
+            _fft,
+            patches,
+            input_core_dims=[["kx", "ky"]],
+            output_core_dims=[["kx", "ky"]],
+            output_dtypes=[np.complex64],
+            dask_gufunc_kwargs={"output_sizes": {"kx": Nfft, "ky": Nfft}},
+            dask="parallelized",
+            exclude_dims={"kx", "ky"},
+        )
+    if isinstance(patches, da.Array):
+        F = da.fft.fft2(patches * window, s=(Nfft, Nfft))
+        if shift:
+            F = da.fft.fftshift(F, axes=(-2, -1))
+        return F
+    F = fft2(patches * window, s=(Nfft, Nfft))
+    if shift:
+        F = fftshift(F, axes=(-2, -1))
+    return F
+
+
+__all__: Sequence[str] = [
+    "fft_patches",
+    "make_kaiser_2d",
+    "make_patches",
+    "make_wavenum_grid",
+]
