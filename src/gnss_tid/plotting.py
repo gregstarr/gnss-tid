@@ -33,12 +33,15 @@ def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
     if ax is None:
         ax = plt.gca()
     kmag = np.hypot(data.Fx, data.Fy)
-    kscale = data.F / kmag.where(lambda x: x > 0, 1)
-    data = data.assign(K=kmag, vx=data.Fx*kscale, vy=data.Fy*kscale)
+    # Unit-length direction vectors so arrow length is decoupled from F's scale
+    # (raw vs. log power); magnitude info goes to the hue (K) channel.
+    inv_kmag = 1.0 / kmag.where(lambda x: x > 0, 1)
+    data = data.assign(K=kmag, vx=data.Fx * inv_kmag, vy=data.Fy * inv_kmag)
     if img:
         data.image.plot(ax=ax, vmax=.3)
-    # directions
-    scale = scale_base * data.kx.shape[0] / 32
+    # Size arrows relative to patch spacing so they're visible at any zoom.
+    dpx = float(np.abs(np.mean(np.diff(data.px.values))))
+    scale = scale_base / dpx
     data.plot.quiver(
         ax=ax, x="px", y="py", u="vx", v="vy", hue="K", cmap="bone",
         headwidth=0, headlength=0, headaxislength=0, add_guide=False,
@@ -85,7 +88,7 @@ def plot_peak_patch_spectrum(data):
 def plot_center_finder(data, scale=5):
     X, Y = np.meshgrid(data.px.values, data.py.values)
     pts = np.column_stack([X.ravel(), Y.ravel()])
-    weights = np.log10(data.F.values.ravel() + 1)
+    weights = data.F.values.ravel()
     vectors = np.column_stack((data.Fx.values.ravel(), data.Fy.values.ravel()))
     cw = find_center(pts, vectors, weights)
     cu = find_center(pts, vectors, np.ones_like(weights))
@@ -93,7 +96,7 @@ def plot_center_finder(data, scale=5):
     tp = np.column_stack([XD.ravel(), YD.ravel()])
 
     vec_norm = np.linalg.norm(vectors, axis=1)
-    mask = vec_norm > 0
+    mask = (vec_norm > 0) & np.isfinite(vec_norm)
     x = tp[:, 0][:, None]
     y = tp[:, 1][:, None]
     x1 = pts[mask, 0][None, :]

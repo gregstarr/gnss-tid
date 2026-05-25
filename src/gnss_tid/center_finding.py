@@ -274,7 +274,14 @@ def find_center(
         ``(2,)`` estimated centre coordinates.
     """
     vec_norm = np.linalg.norm(vectors, axis=1)
-    mask = vec_norm > 0
+    mask = (
+        (vec_norm > 0)
+        & np.isfinite(vec_norm)
+        & np.isfinite(weights)
+        & (weights > 0)
+    )
+    if not np.any(mask):
+        return np.array([np.nan, np.nan])
     w = np.sqrt(weights[mask]) / vec_norm[mask]
     A = np.column_stack([vectors[mask, 1], -vectors[mask, 0]]) * w[:, None]
     b = np.sum(A * pts[mask], axis=1)

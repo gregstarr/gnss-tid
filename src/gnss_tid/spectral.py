@@ -34,6 +34,13 @@ class SpectralConfig:
     Bundling these into one object keeps worker signatures short and makes
     joblib pickling explicit.  Fields are immutable so the same instance can
     be safely shared across processes.
+
+    ``logscale_objective`` controls the two-pass time-smoothing reduction: when
+    ``True``, the rolling mean is taken over ``log10(objective)`` (geometric
+    mean of the per-time objectives); when ``False``, arithmetic mean of the
+    raw linear-power objective.  It has no effect on stored patch powers,
+    which are always linear, and no effect on the single-pass branch (where
+    ``argmax`` over height is invariant to monotone transforms).
     """
 
     obs: pd.DataFrame
@@ -55,13 +62,12 @@ def compute_patch_spectra(
     hres: float,
     block_step: int,
     window: xarray.DataArray,
-    logscale_objective: bool,
 ) -> xarray.DataArray:
     """Compute the FFT patches for a given image.
 
     Constructs overlapping blocks via a rolling window, applies the FFT
-    windowing function, computes the 2-D power spectrum of each block, and
-    optionally log-transforms the result.
+    windowing function, and returns the linear 2-D power spectrum of each
+    block.
 
     Args:
         img: Input image ``DataArray`` with dims ``(x, y)``.
@@ -70,7 +76,6 @@ def compute_patch_spectra(
             wavenumber coordinates.
         block_step: Stride (in pixels) between consecutive block centres.
         window: FFT windowing array of shape ``(1, 1, block_size, block_size)``.
-        logscale_objective: If ``True``, patch power is log10-transformed.
 
     Returns:
         A ``DataArray`` of 2-D power spectra with dims
@@ -80,11 +85,7 @@ def compute_patch_spectra(
     wavenum = make_wavenum_grid(block_size, hres)
     patches = make_patches(img, block_size, block_step)
     F = fft_patches(patches, window, Nfft=block_size)
-    power = (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
-    if logscale_objective:
-        power = np.log10(power)
-
-    return power
+    return (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
 
 
 def extract_patch_peaks(patch: xarray.DataArray) -> xarray.Dataset:
@@ -154,7 +155,6 @@ def build_patch_stack(
                 cfg.image_maker.hres,
                 cfg.block_step,
                 cfg.window,
-                cfg.logscale_objective,
             )
         )
     return xarray.concat(patches, "height").assign_coords(height=heights)
@@ -205,7 +205,6 @@ def build_image_patch_stack(
                 cfg.image_maker.hres,
                 cfg.block_step,
                 cfg.window,
-                cfg.logscale_objective,
             )
         )
         images.append(img)
@@ -331,7 +330,6 @@ def _rebuild_slice_at_height(
             cfg.image_maker.hres,
             cfg.block_step,
             cfg.window,
-            cfg.logscale_objective,
         )
         return img.assign(patch=p).expand_dims(time=[time])
 
@@ -424,9 +422,14 @@ def _focus_with_time_smoothing(
         filter(lambda x: x is not None, objectives), dim="time"
     ).reindex(time=times)
 
-    # Height smoothing — arithmetic mean on the objective surface (log or
-    # linear scale is controlled by logscale_objective at the FFT stage)
-    smoothed = obj_data.rolling(time=time_window, center=True, min_periods=1).mean()
+    # Height smoothing — arithmetic mean on the objective surface (linear
+    # power) or geometric mean (mean of log10 power) when logscale_objective
+    # is set.  Geometric mean down-weights occasional huge peaks in favour of
+    # heights with consistently moderate objectives.
+    obj_for_smoothing = np.log10(obj_data) if cfg.logscale_objective else obj_data
+    smoothed = obj_for_smoothing.rolling(
+        time=time_window, center=True, min_periods=1
+    ).mean()
 
     smooth_nonull = smoothed.dropna(dim="time")
     focus_height = smooth_nonull.isel(
@@ -557,6 +560,17 @@ def run_spectral_focusing(
     sparse_img = _build_sparse_image(data_focused, density_thresh)
 
     init_slice = data_focused.isel(time=data_focused.objective.argmax())
+
+    # Persist diagnostic inputs before plotting so they survive plot failures.
+    init_slice.reset_coords().to_netcdf("plots/init_slice.nc")
+    sparse_img.reset_coords().to_netcdf("plots/sparse_img.nc")
+    logger.info(
+        "init_slice diagnostics | time=%s height=%s objective=%s F max=%s",
+        np.datetime_as_string(init_slice.time.values, unit="s"),
+        float(init_slice.height.values),
+        float(init_slice.objective.values),
+        float(np.nanmax(init_slice.F.values)),
+    )
 
     fig, _ = plot_pre_center_finder(init_slice)
     fig.savefig("plots/pre_center_finder.png")
