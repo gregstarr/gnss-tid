@@ -82,9 +82,9 @@ def compute_patch_spectra(
         ``(px, py, kx, ky)`` where ``px``, ``py`` are spatial patch centres
         and ``kx``, ``ky`` are wavenumbers (cycles km⁻¹).
     """
-    wavenum = make_wavenum_grid(block_size, hres)
+    wavenum = make_wavenum_grid(block_size, hres, shift=True)
     patches = make_patches(img, block_size, block_step)
-    F = fft_patches(patches, window, Nfft=block_size)
+    F = fft_patches(patches, window, Nfft=block_size, shift=True)
     return (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
 
 

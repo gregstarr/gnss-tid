@@ -49,7 +49,7 @@ def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
         angles="xy",
     )
 
-def plot_pre_center_finder(data, scale=5):
+def plot_pre_center_finder(data, scale=50):
     """Diagnostic plot of the raw inputs to ``find_center``.
 
     Image + per-patch wavevector quiver, with **no** center estimates
