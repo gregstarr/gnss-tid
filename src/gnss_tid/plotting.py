@@ -46,6 +46,42 @@ def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
         angles="xy",
     )
 
+def plot_pre_center_finder(data, scale=5):
+    """Diagnostic plot of the raw inputs to ``find_center``.
+
+    Image + per-patch wavevector quiver, with **no** center estimates
+    overlaid.  Use this when ``find_center`` itself fails (returns NaN or
+    nonsense) to inspect what went into it.
+    """
+    fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
+    plot_patches(data, ax=ax, img=True, scale_base=scale)
+    return fig, ax
+
+
+def plot_density_map(data):
+    """Density (data points per pixel) at the focus slice."""
+    fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
+    data.density.plot(ax=ax)
+    return fig, ax
+
+
+def plot_peak_patch_spectrum(data):
+    """2-D power spectrum of the patch with the largest peak power.
+
+    Picks the ``(px, py)`` location with maximum ``F`` and shows its full
+    ``(kx, ky)`` spectrum, to confirm the peak is a real lobe rather than a
+    single noisy bin.
+    """
+    peak = data.F.argmax(dim=["px", "py"])
+    fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
+    data.patch.isel(peak).plot(ax=ax)
+    ax.set_title(
+        f"peak patch @ px={float(data.px.isel(px=peak['px']).item()):.0f}, "
+        f"py={float(data.py.isel(py=peak['py']).item()):.0f}"
+    )
+    return fig, ax
+
+
 def plot_center_finder(data, scale=5):
     X, Y = np.meshgrid(data.px.values, data.py.values)
     pts = np.column_stack([X.ravel(), Y.ravel()])

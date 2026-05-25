@@ -15,7 +15,13 @@ from .coords import Local2D
 from .fft import fft_patches, make_patches, make_wavenum_grid
 from .image import ImageMakerBase, generate_image
 from .parallel_logging import log_queue_listener, worker_logger
-from .plotting import plot_center_finder
+from .plotting import (
+    plot_center_finder,
+    plot_center_finder_fit,
+    plot_density_map,
+    plot_peak_patch_spectrum,
+    plot_pre_center_finder,
+)
 from .pointdata import TimeWindow, get_data, make_time_windows
 
 logger = logging.getLogger(__name__)
@@ -551,6 +557,19 @@ def run_spectral_focusing(
     sparse_img = _build_sparse_image(data_focused, density_thresh)
 
     init_slice = data_focused.isel(time=data_focused.objective.argmax())
+
+    fig, _ = plot_pre_center_finder(init_slice)
+    fig.savefig("plots/pre_center_finder.png")
+    plt.close(fig)
+
+    fig, _ = plot_density_map(init_slice)
+    fig.savefig("plots/density.png")
+    plt.close(fig)
+
+    fig, _ = plot_peak_patch_spectrum(init_slice)
+    fig.savefig("plots/peak_patch.png")
+    plt.close(fig)
+
     fig, _ = plot_center_finder(init_slice)
     fig.savefig("plots/center_init.png")
     plt.close(fig)
@@ -567,6 +586,10 @@ def run_spectral_focusing(
         center_finder=center_finder,
     )
     logger.info("params fit in %d iterations", len(params["history"]["metric"]))
+
+    fig, _ = plot_center_finder_fit([params])
+    fig.savefig("plots/center_finder_fit.png")
+    plt.close(fig)
 
     coord_center = (np.mean(cfg.lat_limits), np.mean(cfg.lon_limits))
     return data_focused.assign(
