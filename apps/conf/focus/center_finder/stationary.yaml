@@ -2,5 +2,5 @@ _target_: gnss_tid.center_finding.run_stationary_center_finder
 _partial_: true
 max_iter: 500
 learning_rate: 1.0
-num_starts: 20
+num_starts: 10
 reg_strength: .005
