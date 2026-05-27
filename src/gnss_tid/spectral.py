@@ -2,7 +2,6 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -14,7 +13,7 @@ from .center_finding import run_smoothed_center_finder
 from .coords import Local2D
 from .fft import fft_patches, make_patches, make_wavenum_grid
 from .image import ImageMakerBase, generate_image
-from .parallel_logging import log_queue_listener, worker_logger
+from .parallel_logging import WorkerChannel, worker_channels
 from .plotting import (
     plot_center_finder,
     plot_density_map,
@@ -117,7 +116,7 @@ def build_patch_stack(
     ts: TimeWindow,
     heights: np.ndarray,
     cfg: SpectralConfig,
-    wlog: logging.Logger | None = None,
+    ch: WorkerChannel | None = None,
 ) -> xarray.DataArray | None:
     """Compute FFT patches at each height without keeping the gridded images.
 
@@ -129,23 +128,22 @@ def build_patch_stack(
         ts: Time window for this slice.
         heights: Array of IPP heights (km) to evaluate.
         cfg: Shared spectral configuration.
-        wlog: Optional logger; falls back to module logger.
+        ch: Optional worker channel; one progress tick is emitted per height.
 
     Returns:
         A ``DataArray`` of patches with dims ``(height, px, py, kx, ky)``, or
         ``None`` if data retrieval failed for any height.
     """
-    if wlog is None:
-        wlog = logger
+    ch = ch or WorkerChannel()
     patches = []
     for height in heights:
-        wlog.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
+        ch.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
-            wlog.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
+            ch.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
             return None
         img = generate_image(data, cfg.image_maker, cfg.tec_name)
         patches.append(
@@ -156,6 +154,7 @@ def build_patch_stack(
                 cfg.window,
             )
         )
+        ch.report()
     return xarray.concat(patches, "height").assign_coords(height=heights)
 
 
@@ -163,7 +162,7 @@ def build_image_patch_stack(
     ts: TimeWindow,
     heights: np.ndarray,
     cfg: SpectralConfig,
-    wlog: logging.Logger | None = None,
+    ch: WorkerChannel | None = None,
 ) -> xarray.Dataset | None:
     """Compute images and FFT patches at every requested height.
 
@@ -174,26 +173,25 @@ def build_image_patch_stack(
         ts: Time window for this slice.
         heights: Array of IPP heights (km) to process.
         cfg: Shared spectral configuration.
-        wlog: Optional logger; falls back to module logger.
+        ch: Optional worker channel; one progress tick is emitted per height.
 
     Returns:
         A ``Dataset`` with dims ``(height, x, y)`` containing variables
         ``image``, ``patch``, and ``n`` (data-point count per height), or
         ``None`` if data retrieval failed for any height.
     """
-    if wlog is None:
-        wlog = logger
+    ch = ch or WorkerChannel()
     images = []
     patches = []
     npts = []
     for height in heights:
-        wlog.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
+        ch.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
-            wlog.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
+            ch.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
             return None
         npts.append(len(data))
         img = generate_image(data, cfg.image_maker, cfg.tec_name)
@@ -206,6 +204,7 @@ def build_image_patch_stack(
             )
         )
         images.append(img)
+        ch.report()
 
     return (
         xarray.concat(images, "height")
@@ -219,7 +218,7 @@ def compute_height_objectives_for_slice(
     time: np.datetime64,
     heights: np.ndarray,
     cfg: SpectralConfig,
-    log_queue: Any | None = None,
+    ch: WorkerChannel | None = None,
 ) -> xarray.DataArray | None:
     """First-pass worker: return per-height FFT objectives for one time slice.
 
@@ -228,15 +227,15 @@ def compute_height_objectives_for_slice(
         time: Start timestamp; used as the ``time`` coordinate.
         heights: Array of heights (km) to evaluate.
         cfg: Shared spectral configuration.
-        log_queue: Optional multiprocessing queue for worker logging.
+        ch: Optional worker channel carrying the log and progress queues.
 
     Returns:
         A ``DataArray`` of objective values with dims ``(time, height)``,
         or ``None`` if data retrieval failed for any height.
     """
-    with worker_logger(log_queue) as wlog:
-        wlog.info("[%s-%s]: processing heights", ts.start_time, ts.end_time)
-        patches = build_patch_stack(ts, heights, cfg, wlog=wlog)
+    with (ch or WorkerChannel()) as ch:
+        ch.info("[%s-%s]: processing heights", ts.start_time, ts.end_time)
+        patches = build_patch_stack(ts, heights, cfg, ch=ch)
         if patches is None:
             return None
         return extract_patch_peaks(patches).objective.expand_dims(time=[time])
@@ -247,7 +246,7 @@ def _select_best_height_for_slice(
     time: np.datetime64,
     heights: np.ndarray,
     cfg: SpectralConfig,
-    log_queue: Any | None = None,
+    ch: WorkerChannel | None = None,
 ) -> tuple[xarray.Dataset, xarray.DataArray] | None:
     """Single-pass worker: compute, select best height, and return full slice.
 
@@ -262,7 +261,8 @@ def _select_best_height_for_slice(
         time: Start timestamp; used as the ``time`` coordinate.
         heights: Array of IPP heights (km) to evaluate.
         cfg: Shared spectral configuration.
-        log_queue: Optional multiprocessing queue for worker logging.
+        ch: Optional worker channel carrying the log and progress queues;
+            one progress tick is emitted per height.
 
     Returns:
         A 2-tuple ``(best_slice, objectives)``:
@@ -274,9 +274,9 @@ def _select_best_height_for_slice(
 
         Returns ``None`` if data retrieval failed for any height.
     """
-    with worker_logger(log_queue) as wlog:
-        wlog.info("[%s-%s]: single-pass slice", ts.start_time, ts.end_time)
-        data_all = build_image_patch_stack(ts, heights, cfg, wlog=wlog)
+    with (ch or WorkerChannel()) as ch:
+        ch.info("[%s-%s]: single-pass slice", ts.start_time, ts.end_time)
+        data_all = build_image_patch_stack(ts, heights, cfg, ch=ch)
         if data_all is None:
             return None
         summary = extract_patch_peaks(data_all.patch)
@@ -298,7 +298,7 @@ def _rebuild_slice_at_height(
     time: np.datetime64,
     height: float,
     cfg: SpectralConfig,
-    log_queue: Any | None = None,
+    ch: WorkerChannel | None = None,
 ) -> xarray.Dataset | None:
     """Second-pass worker: rebuild image and patch at a fixed focus height.
 
@@ -307,14 +307,15 @@ def _rebuild_slice_at_height(
         time: Start timestamp; used as the ``time`` coordinate.
         height: IPP height (km) at which to evaluate this time slice.
         cfg: Shared spectral configuration.
-        log_queue: Optional multiprocessing queue for worker logging.
+        ch: Optional worker channel carrying the log and progress queues;
+            one progress tick is emitted at the end of the slice.
 
     Returns:
         A ``Dataset`` with variables ``image``, ``density``, and ``patch``,
         expanded along ``time``, or ``None`` if data retrieval failed.
     """
-    with worker_logger(log_queue) as wlog:
-        wlog.info("focused slice time=%s height=%.1f", time, height)
+    with (ch or WorkerChannel()) as ch:
+        ch.info("focused slice time=%s height=%.1f", time, height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
@@ -328,6 +329,7 @@ def _rebuild_slice_at_height(
             cfg.block_step,
             cfg.window,
         )
+        ch.report()
         return img.assign(patch=p).expand_dims(time=[time])
 
 
@@ -378,9 +380,13 @@ def _focus_per_slice(
     logger.info(
         "run_spectral_focusing: single pass (no smoothing), n_jobs=%d", n_jobs
     )
-    with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
+    total = len(time_windows) * len(heights)
+    with (
+        worker_channels(total, desc="focus (single pass)") as ch,
+        Parallel(n_jobs=n_jobs) as parallel,
+    ):
         single_slices = parallel(
-            delayed(_select_best_height_for_slice)(ts, time, heights, cfg, q)
+            delayed(_select_best_height_for_slice)(ts, time, heights, cfg, ch)
             for ts, time in zip(time_windows, times, strict=True)
         )
 
@@ -409,9 +415,15 @@ def _focus_with_time_smoothing(
     logger.info(
         "run_spectral_focusing: first pass (objectives), n_jobs=%d", n_jobs
     )
-    with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
+    total_pass1 = len(time_windows) * len(heights)
+    with (
+        worker_channels(total_pass1, desc="focus pass 1 (objectives)") as ch,
+        Parallel(n_jobs=n_jobs) as parallel,
+    ):
         objectives = parallel(
-            delayed(compute_height_objectives_for_slice)(ts, time, heights, cfg, q)
+            delayed(compute_height_objectives_for_slice)(
+                ts, time, heights, cfg, ch
+            )
             for ts, time in zip(time_windows, times, strict=True)
         )
 
@@ -449,9 +461,14 @@ def _focus_with_time_smoothing(
         len(second_pass_inputs),
         len(time_windows),
     )
-    with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
+    with (
+        worker_channels(
+            len(second_pass_inputs), desc="focus pass 2 (reconstruction)"
+        ) as ch,
+        Parallel(n_jobs=n_jobs) as parallel,
+    ):
         focused_slices = parallel(
-            delayed(_rebuild_slice_at_height)(ts, time, height, cfg, q)
+            delayed(_rebuild_slice_at_height)(ts, time, height, cfg, ch)
             for ts, time, height in second_pass_inputs
         )
 

@@ -1,62 +1,100 @@
-"""Logging helpers for joblib worker processes.
+"""IPC helpers for joblib worker processes.
 
-joblib spawns workers via ``loky``/``multiprocessing``, so log records emitted
+joblib spawns workers via ``loky``/``multiprocessing``, so records emitted
 inside a worker do not reach the parent process's handlers by default.  This
-module provides two composable context managers that bridge that gap by
-funnelling worker records through a shared ``multiprocessing.Queue``.
+module provides two channels for bridging that gap:
+
+* a **log queue** that forwards ``logging`` records back to the parent's
+  root-logger handlers, and
+* a **progress queue** whose tokens advance a ``tqdm`` bar on the parent.
+
+Both are carried together in a :class:`WorkerChannel`, which is itself a
+context manager exposing ``info`` / ``warning`` / ``report`` methods so the
+worker only ever sees a single object.  :func:`worker_channels` opens both
+listeners on the parent side and yields a populated ``WorkerChannel`` ready
+to hand to ``delayed(...)``.
 
 Usage
 -----
-Wrap the parallel section in the parent with ``log_queue_listener`` and pass
-the yielded queue into each worker call.  Inside the worker, wrap the body
-in ``worker_logger`` and use the yielded logger::
+Wrap the parallel section in the parent with :func:`worker_channels` and
+pass the yielded channel into each worker call.  Inside the worker, enter
+the channel once at the top and call its methods::
 
     from joblib import Parallel, delayed
-    from gnss_tid.parallel_logging import log_queue_listener, worker_logger
+    from gnss_tid.parallel_logging import WorkerChannel, worker_channels
 
-    def worker(item, log_queue=None):
-        with worker_logger(log_queue) as wlog:
-            wlog.info("processing %s", item)
+    def worker(item, ch: WorkerChannel | None = None):
+        with (ch or WorkerChannel()) as ch:
+            ch.info("processing %s", item)
             ...
+            ch.report()
 
-    with log_queue_listener() as q, Parallel(n_jobs=4) as parallel:
-        parallel(delayed(worker)(item, q) for item in items)
+    with worker_channels(total=len(items), desc="work") as ch, \\
+         Parallel(n_jobs=4) as parallel:
+        parallel(delayed(worker)(item, ch) for item in items)
 
-The parent's root-logger handlers receive every worker record as if it had
-been emitted locally.  When ``log_queue`` is ``None`` (e.g. when calling the
-worker serially for debugging), ``worker_logger`` yields the module logger
-unchanged so the same worker body works in both modes.
+A default-constructed ``WorkerChannel()`` has both queues set to ``None``;
+``info`` / ``warning`` fall back to the module logger and ``report`` is a
+no-op, so the same worker body works in serial callers that pass ``None``.
 """
 
 import logging
+import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from logging.handlers import QueueHandler, QueueListener
 from multiprocessing import Manager
 from os import getpid
 from typing import Any
 
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
+
 logger = logging.getLogger(__name__)
 
 
-@contextmanager
-def worker_logger(log_queue: Any | None = None, level: int = logging.INFO):
-    """Yield a logger that forwards records to a multiprocessing queue.
+@dataclass
+class WorkerChannel:
+    """IPC handle for a joblib worker — context manager + log/progress API.
 
-    When ``log_queue`` is ``None`` the module logger is yielded unchanged so
-    the same code path works in serial callers.  When a queue is supplied,
-    a per-PID logger is created and its handler is removed on exit.
+    Carries the queues a worker uses to forward log records and progress
+    ticks back to the parent process.  Either field may be ``None`` to
+    disable that channel individually; ``WorkerChannel()`` with no args
+    disables both (logs fall through to the module logger, progress is a
+    no-op).
     """
-    if log_queue is None:
-        yield logger
-        return
-    wlog = logging.getLogger(f"worker {getpid()}")
-    handler = QueueHandler(log_queue)
-    wlog.addHandler(handler)
-    wlog.setLevel(level)
-    try:
-        yield wlog
-    finally:
-        wlog.removeHandler(handler)
+
+    log_queue: Any = None
+    progress_queue: Any = None
+
+    def __enter__(self) -> "WorkerChannel":
+        if self.log_queue is not None:
+            self._wlog = logging.getLogger(f"worker {getpid()}")
+            self._handler = QueueHandler(self.log_queue)
+            self._wlog.addHandler(self._handler)
+            self._wlog.setLevel(logging.INFO)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        handler = getattr(self, "_handler", None)
+        if handler is not None:
+            self._wlog.removeHandler(handler)
+            self._wlog = None
+            self._handler = None
+
+    def _logger(self) -> logging.Logger:
+        return getattr(self, "_wlog", None) or logger
+
+    def info(self, msg: str, *args: Any) -> None:
+        self._logger().info(msg, *args)
+
+    def warning(self, msg: str, *args: Any) -> None:
+        self._logger().warning(msg, *args)
+
+    def report(self, n: int = 1) -> None:
+        if self.progress_queue is None:
+            return
+        self.progress_queue.put(n)
 
 
 @contextmanager
@@ -73,3 +111,50 @@ def log_queue_listener():
         yield q
     finally:
         listener.stop()
+
+
+@contextmanager
+def progress_queue_listener(total: int, desc: str):
+    """Yield a multiprocessing queue whose tokens advance a ``tqdm`` bar.
+
+    Workers push integer tick counts onto the queue (see
+    :meth:`WorkerChannel.report`).  A daemon thread on the parent process
+    drains the queue and calls ``bar.update(n)`` for each value.  On exit a
+    ``None`` sentinel stops the thread and the bar is closed.
+    """
+    q = Manager().Queue()
+    with logging_redirect_tqdm():
+        bar = tqdm(total=total, desc=desc)
+
+        def _drain():
+            while True:
+                item = q.get()
+                if item is None:
+                    return
+                bar.update(item)
+
+        t = threading.Thread(target=_drain, daemon=True)
+        t.start()
+        try:
+            yield q
+        finally:
+            q.put(None)
+            t.join()
+            bar.close()
+
+
+@contextmanager
+def worker_channels(total: int, desc: str):
+    """Open both listeners together and yield a populated ``WorkerChannel``.
+
+    Convenience wrapper for joblib drivers that always use both the log and
+    progress channels with the same lifetime.
+    """
+    # progress_queue_listener swaps console handlers via logging_redirect_tqdm;
+    # log_queue_listener captures the handler list at construction time, so it
+    # must run *inside* the redirect to see the tqdm-aware handlers.
+    with (
+        progress_queue_listener(total, desc) as pq,
+        log_queue_listener() as lq,
+    ):
+        yield WorkerChannel(log_queue=lq, progress_queue=pq)

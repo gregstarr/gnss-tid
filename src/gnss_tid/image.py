@@ -1,6 +1,5 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -12,7 +11,7 @@ from skimage import filters
 from sklearn.metrics import pairwise_distances
 
 from .coords import Local2D
-from .parallel_logging import log_queue_listener, worker_logger
+from .parallel_logging import WorkerChannel, log_queue_listener
 from .pointdata import TimeWindow, get_data
 
 logger = logging.getLogger(__name__)
@@ -170,18 +169,18 @@ def _build_image_for_slice(
     lat_limits: tuple[float, float],
     lon_limits: tuple[float, float],
     proj: Local2D,
-    log_queue: Any | None = None,
+    ch: WorkerChannel | None = None,
 ) -> xarray.Dataset | None:
     """Fetch one time window and build its image at the given height.
 
     Returns a ``Dataset`` expanded along ``time`` (= ``ts.start_time``) with a
     ``height`` coord, or ``None`` if data retrieval failed.
     """
-    with worker_logger(log_queue) as wlog:
-        wlog.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
+    with (ch or WorkerChannel()) as ch:
+        ch.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
         data = get_data(obs, rx, ts, height, lat_limits, lon_limits, proj=proj)
         if data is None:
-            wlog.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
+            ch.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
             return None
         img = generate_image(data, image_maker, tec_name)
         return img.expand_dims(time=[ts.start_time]).assign_coords(
@@ -226,10 +225,11 @@ def generate_image_stack(
     """
     height_arr = np.broadcast_to(np.asarray(heights), (len(time_windows),))
     with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
+        ch = WorkerChannel(log_queue=q)
         results = parallel(
             delayed(_build_image_for_slice)(
                 obs, rx, ts, float(h), image_maker, tec_name,
-                lat_limits, lon_limits, proj, q,
+                lat_limits, lon_limits, proj, ch,
             )
             for ts, h in zip(time_windows, height_arr, strict=True)
         )
