@@ -1,14 +1,7 @@
-files:
-  - /disk1/tid/sharon/poly/2015/0325/*.nc
-latitude_limits:
-  - 24.0
-  - 51.0
-longitude_limits:
-  - -126.0
-  - -70.0
+defaults:
+  - default
+  - _self_
+
 time_limits:
   - "20150325_234500"
   - "20150326_001600"
-el_min: 30
-q_thresh: .998
-n_jobs: 20

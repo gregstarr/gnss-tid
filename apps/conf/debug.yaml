@@ -1,10 +1,9 @@
 event:
-  pointdata:
-    files: 
-      - /disk1/tid/sharon/poly/2015/0325/*.nc
-    time_limits:
-      - "20150325_000000"
-      - "20150327_000000"
+  files:
+    - /disk1/tid/sharon/poly/2015/0325/*.nc
+  time_limits:
+    - "20150325_000000"
+    - "20150327_000000"
 
 focus:
   n_jobs: 1

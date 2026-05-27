@@ -1,14 +1,7 @@
-files:
-  - /disk1/tid/2015/0325/*.nc
-latitude_limits:
-  - 24.0
-  - 48.0
-longitude_limits:
-  - -120.0
-  - -75.0
+defaults:
+  - default
+  - _self_
+
 time_limits:
-  - "20150325_234000"
-  - "20150325_235000"
-el_min: 30
-q_thresh: 0.99
-n_jobs: 16
+  - "20150325_233500"
+  - "20150325_235500"

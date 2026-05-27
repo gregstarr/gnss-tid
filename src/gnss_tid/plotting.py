@@ -6,7 +6,7 @@ from matplotlib.axes import Axes
 from scipy.ndimage import maximum_filter1d
 from tqdm import autonotebook
 
-from .center_finding import find_center
+from .center_finding import find_center, find_center_huber
 
 
 def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):
@@ -29,27 +29,40 @@ def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):
     return artists
 
 
-def plot_patches(data, img=True, ax=None, scale_base=5, width=.006):
+def plot_patches(data, img=True, ax=None, length_fraction=0.3, width=.006):
     if ax is None:
         ax = plt.gca()
-    kmag = np.hypot(data.Fx, data.Fy)
-    # Unit-length direction vectors so arrow length is decoupled from F's scale
-    # (raw vs. log power); magnitude info goes to the hue (K) channel.
-    inv_kmag = 1.0 / kmag.where(lambda x: x > 0, 1)
-    data = data.assign(K=kmag, vx=data.Fx * inv_kmag, vy=data.Fy * inv_kmag)
     if img:
         data.image.plot(ax=ax, vmax=.3)
-    # Size arrows relative to patch spacing so they're visible at any zoom.
+
+    # Flatten the patch grid via xarray so coords stay aligned with values
+    # regardless of (px, py) dim order.
+    stacked = data[["F", "Fx", "Fy"]].stack(p=("px", "py"))
+    px_vals = stacked.px.values
+    py_vals = stacked.py.values
+    Fx = stacked.Fx.values
+    Fy = stacked.Fy.values
+    F = stacked.F.values
+
+    kmag = np.hypot(Fx, Fy)
+    mask = (kmag > 0) & np.isfinite(kmag) & np.isfinite(F)
+
+    # Constant arrow length in data units so size carries no information.
     dpx = float(np.abs(np.mean(np.diff(data.px.values))))
-    scale = scale_base / dpx
-    data.plot.quiver(
-        ax=ax, x="px", y="py", u="vx", v="vy", hue="K", cmap="bone",
-        headwidth=0, headlength=0, headaxislength=0, add_guide=False,
-        scale=scale, width=width, vmin=0, vmax=.01, pivot="mid", scale_units="xy",
-        angles="xy",
+    length = dpx * length_fraction
+    u = (Fx[mask] / kmag[mask]) * length
+    v = (Fy[mask] / kmag[mask]) * length
+
+    ax.quiver(
+        px_vals[mask], py_vals[mask], u, v, F[mask],
+        cmap="bone",
+        scale=1, scale_units="xy", angles="xy",
+        pivot="mid",
+        headwidth=0, headlength=0, headaxislength=0,
+        width=width,
     )
 
-def plot_pre_center_finder(data, scale=50):
+def plot_pre_center_finder(data):
     """Diagnostic plot of the raw inputs to ``find_center``.
 
     Image + per-patch wavevector quiver, with **no** center estimates
@@ -57,7 +70,7 @@ def plot_pre_center_finder(data, scale=50):
     nonsense) to inspect what went into it.
     """
     fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
-    plot_patches(data, ax=ax, img=True, scale_base=scale)
+    plot_patches(data, ax=ax, img=True)
     return fig, ax
 
 
@@ -85,46 +98,72 @@ def plot_peak_patch_spectrum(data):
     return fig, ax
 
 
-def plot_center_finder(data, scale=5):
-    X, Y = np.meshgrid(data.px.values, data.py.values)
-    pts = np.column_stack([X.ravel(), Y.ravel()])
-    weights = data.F.values.ravel()
-    vectors = np.column_stack((data.Fx.values.ravel(), data.Fy.values.ravel()))
+def plot_center_finder(data):
+    """Diagnostic plot pooling all time slices for the seed estimators.
+
+    LSQ and grid-search objectives are summed over the full ``(time, py, px)``
+    patch field; the quiver overlay uses only the highest-objective time
+    slice to keep the figure legible.
+    """
+    px = data.px.values
+    py = data.py.values
+    Fx_all = data.Fx.values
+    Fy_all = data.Fy.values
+    F_all = data.F.values
+    T = F_all.shape[0]
+
+    X, Y = np.meshgrid(px, py)
+    pts_single = np.column_stack([X.ravel(), Y.ravel()])
+    pts = np.tile(pts_single, (T, 1))
+    vectors = np.column_stack([Fx_all.ravel(), Fy_all.ravel()])
+    weights = F_all.ravel()
     cw = find_center(pts, vectors, weights)
     cu = find_center(pts, vectors, np.ones_like(weights))
+    ch = find_center_huber(pts, vectors, weights)
+
     XD, YD = np.meshgrid(data.x.values, data.y.values)
-    tp = np.column_stack([XD.ravel(), YD.ravel()])
+    # Δx, Δy are time-independent because patch positions are shared across
+    # time. Precompute once, then accumulate the kernel sum per slice.
+    dx = XD.ravel()[:, None] - pts_single[:, 0][None, :]
+    dy = YD.ravel()[:, None] - pts_single[:, 1][None, :]
 
-    vec_norm = np.linalg.norm(vectors, axis=1)
-    mask = (vec_norm > 0) & np.isfinite(vec_norm)
-    x = tp[:, 0][:, None]
-    y = tp[:, 1][:, None]
-    x1 = pts[mask, 0][None, :]
-    y1 = pts[mask, 1][None, :]
-    vx = vectors[mask, 0][None, :]
-    vy = vectors[mask, 1][None, :]
-    # Numerator: |vx * (y - y1) - vy * (x - x1)|
-    numerator = np.abs(vx * (y - y1) - vy * (x - x1))
-    # Denominator: sqrt(vx^2 + vy^2)
-    denominator = np.sqrt(vx**2 + vy**2)
-    # Distance matrix: D[i, j]
-    distances = numerator / denominator
-    dw = np.sum(weights[None, mask] * np.exp(-(distances/100)**2), axis=1).reshape(XD.shape)
+    dw = np.zeros(XD.size)
+    for t in range(T):
+        Fx_t = Fx_all[t].ravel()
+        Fy_t = Fy_all[t].ravel()
+        F_t = F_all[t].ravel()
+        kmag = np.hypot(Fx_t, Fy_t)
+        mask = (kmag > 0) & np.isfinite(kmag) & np.isfinite(F_t) & (F_t > 0)
+        if not np.any(mask):
+            continue
+        num = np.abs(
+            Fx_t[mask][None, :] * dy[:, mask] - Fy_t[mask][None, :] * dx[:, mask]
+        )
+        d = num / kmag[mask][None, :]
+        dw += np.sum(F_t[mask][None, :] * np.exp(-(d / 100) ** 2), axis=1)
 
-    cg = tp[np.argmax(dw)]
+    dw = dw.reshape(XD.shape)
+    cg_idx = int(np.argmax(dw))
+    cg = np.array([XD.ravel()[cg_idx], YD.ravel()[cg_idx]])
+
+    init_slice = data.isel(time=data.objective.argmax())
 
     fig, ax = plt.subplots(1, 2, tight_layout=True, figsize=(12, 5))
-    plot_patches(data, ax=ax[0], img=True, scale_base=scale)
-    ax[0].plot(cw[0], cw[1], 'x')
-    ax[0].plot(cu[0], cu[1], 'x')
-    ax[0].plot(cg[0], cg[1], 'x')
+    plot_patches(init_slice, ax=ax[0], img=True)
+    ax[0].plot(cw[0], cw[1], 'x', label="lsq weighted")
+    ax[0].plot(cu[0], cu[1], 'x', label="lsq unweighted")
+    ax[0].plot(ch[0], ch[1], 'x', label="huber")
+    ax[0].plot(cg[0], cg[1], 'x', label="grid search")
+    ax[0].legend()
 
     ax[1].pcolormesh(XD, YD, dw)
-    ax[1].plot(cw[0], cw[1], 'x')
-    ax[1].plot(cu[0], cu[1], 'x')
-    ax[1].plot(cg[0], cg[1], 'x')
-    plot_patches(data, ax=ax[1], img=False, scale_base=scale)
-    print(f"lsq unweighted: {cu}, lsq weighted {cw}, grid search: {cg}")
+    ax[1].plot(cw[0], cw[1], 'x', label="lsq weighted")
+    ax[1].plot(cu[0], cu[1], 'x', label="lsq unweighted")
+    ax[1].plot(ch[0], ch[1], 'x', label="huber")
+    ax[1].plot(cg[0], cg[1], 'x', label="grid search")
+    ax[1].legend()
+    plot_patches(init_slice, ax=ax[1], img=False)
+    print(f"lsq unweighted: {cu}, lsq weighted: {cw}, huber: {ch}, grid search: {cg}")
     return fig, ax
 
 
@@ -132,15 +171,33 @@ def plot_center_finder_fit(result_list, s=4, c0=None, cbox=None):
     fig, ax = plt.subplots(2, 4, figsize=(4*s, 2*s), tight_layout=True, sharex="col")
 
     best_iteration = np.argmax([r["metric"] for r in result_list])
+    # Per-restart colors shared across columns 0, 1, 2 so a given restart is
+    # visually traceable between metric / lambda-phase / center panels.
+    colors = plt.cm.tab20(np.linspace(0, 1, len(result_list)))
     for ii, result in enumerate(result_list):
-        ax[0, 0].plot(result["history"]["metric"])
+        color = colors[ii]
+        ax[0, 0].plot(result["history"]["metric"], color=color)
+        ax[1, 0].semilogy(
+            maximum_filter1d(np.diff(result["history"]["metric"]), 9), color=color
+        )
+
         z = np.array(result["history"]["center"])
-        ax[0, 2].plot(z[:, 0], z[:, 1], '-')
-        if ii == best_iteration:
-            ax[0, 2].plot(z[-1, 0], z[-1, 1], 'r.')
-        else:
-            ax[0, 2].plot(z[-1, 0], z[-1, 1], 'k.')
-        ax[1, 0].semilogy(maximum_filter1d(np.diff(result["history"]["metric"]), 9))
+        ax[0, 2].plot(z[:, 0], z[:, 1], '-', color=color)
+        terminal_color = 'r' if ii == best_iteration else 'k'
+        ax[0, 2].plot(z[-1, 0], z[-1, 1], '.', color=terminal_color)
+
+        # Per-time-step parameter histories collapsed to median, one line per
+        # restart, so the panel parallels the per-restart metric view.
+        wl = np.array(result["history"]["wavelength"])
+        ax[0, 1].plot(np.median(wl, axis=1), "-", color=color)
+        ph = np.unwrap(np.array(result["history"]["phase"]), axis=0)
+        ax[1, 1].plot(np.median(ph, axis=1), "-", color=color)
+
+        # Per-restart final wavelength(t) / offset(t) as grey low-alpha
+        # background so column 3 shows the spread across restarts.
+        if ii != best_iteration:
+            ax[0, 3].plot(result["wavelength"], color="grey", alpha=0.3, lw=0.5)
+            ax[1, 3].plot(result["offset"], color="grey", alpha=0.3, lw=0.5)
 
     if c0 is not None:
         ax[0, 2].plot(c0[0], c0[1], 'kx')
@@ -155,10 +212,6 @@ def plot_center_finder_fit(result_list, s=4, c0=None, cbox=None):
         ax[0, 2].plot(pts[:, 0], pts[:, 1], 'k--')
 
     result = result_list[best_iteration]
-    z = np.array(result["history"]["wavelength"])
-    ax[0, 1].plot(z, "-")
-    z = np.unwrap(np.array(result["history"]["phase"]), axis=0)
-    ax[1, 1].plot(z, "-")
     ax[1, 3].plot(result["offset"])
     ax[0, 3].plot(result["wavelength"])
 

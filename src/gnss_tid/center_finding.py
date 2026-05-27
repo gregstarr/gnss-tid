@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
+from sklearn.linear_model import HuberRegressor
 from torch import nn
 
 logger = logging.getLogger(__name__)
@@ -289,6 +290,46 @@ def find_center(
     return center
 
 
+def find_center_huber(
+    pts: np.ndarray,
+    vectors: np.ndarray,
+    weights: np.ndarray,
+    epsilon: float = 1.35,
+) -> np.ndarray:
+    """Robust centre estimate using Huber loss instead of L2.
+
+    Same line-distance geometry as :func:`find_center`, but solved with
+    sklearn's :class:`HuberRegressor` so distant outlier wavevectors are
+    downweighted rather than dragging the solution.  Row weights are passed
+    as ``sample_weight`` (not baked into ``A``) so the loss saturation works
+    on the geometric residual.
+
+    Args:
+        pts: ``(N, 2)`` patch centre coordinates.
+        vectors: ``(N, 2)`` per-patch peak wavevector components.
+        weights: ``(N,)`` non-negative weights (e.g. spectral peak power).
+        epsilon: Huber transition (L2 below ``epsilon * scale``, L1 above).
+
+    Returns:
+        ``(2,)`` estimated centre coordinates.
+    """
+    vec_norm = np.linalg.norm(vectors, axis=1)
+    mask = (
+        (vec_norm > 0)
+        & np.isfinite(vec_norm)
+        & np.isfinite(weights)
+        & (weights > 0)
+    )
+    if not np.any(mask):
+        return np.array([np.nan, np.nan])
+    inv_v = 1.0 / vec_norm[mask]
+    A = np.column_stack([vectors[mask, 1], -vectors[mask, 0]]) * inv_v[:, None]
+    b = np.sum(A * pts[mask], axis=1)
+    reg = HuberRegressor(epsilon=epsilon, alpha=0.0, fit_intercept=False)
+    reg.fit(A, b, sample_weight=weights[mask])
+    return reg.coef_
+
+
 def run_smoothed_center_finder(
     px: np.ndarray,
     py: np.ndarray,
@@ -309,10 +350,11 @@ def run_smoothed_center_finder(
     Args:
         px: ``(Px,)`` patch-centre x coordinates.
         py: ``(Py,)`` patch-centre y coordinates.
-        F: Peak spectral power on the ``(px, py)`` grid, used as weighting
-            when seeding the centre.
-        Fx: Peak wavenumber x-component on the ``(px, py)`` grid.
-        Fy: Peak wavenumber y-component on the ``(px, py)`` grid.
+        F: Peak spectral power, shape ``(Py, Px)`` or ``(T, Py, Px)``. When
+            the time axis is present, all time slices are pooled into the
+            seed LSQ.
+        Fx: Peak wavenumber x-component, same shape as ``F``.
+        Fy: Peak wavenumber y-component, same shape as ``F``.
         sparse_x: ``(N,)`` x coordinates of the sparse image pixels.
         sparse_y: ``(N,)`` y coordinates of the sparse image pixels.
         sparse_image: ``(N, T)`` sparse image values across ``T`` time steps.
@@ -324,10 +366,16 @@ def run_smoothed_center_finder(
     """
     logger.info("finding center")
     X, Y = np.meshgrid(px, py)
-    pts = np.column_stack([X.ravel(), Y.ravel()])
+    pts_single = np.column_stack([X.ravel(), Y.ravel()])
+    if F.ndim == 3:
+        pts = np.tile(pts_single, (F.shape[0], 1))
+    elif F.ndim == 2:
+        pts = pts_single
+    else:
+        raise ValueError(f"F must be 2- or 3-D, got shape {F.shape}")
     vectors = np.column_stack([Fx.ravel(), Fy.ravel()])
     weights = F.ravel()
     k = np.hypot(vectors[:, 0], vectors[:, 1])
-    c0 = find_center(pts, vectors, weights)
-    w0 = 1 / k.max()
+    c0 = find_center_huber(pts, vectors, weights)
+    w0 = 1 / np.nanmax(k)
     return center_finder(c0, w0, sparse_x, sparse_y, sparse_image)

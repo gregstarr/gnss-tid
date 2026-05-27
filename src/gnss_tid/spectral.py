@@ -17,7 +17,6 @@ from .image import ImageMakerBase, generate_image
 from .parallel_logging import log_queue_listener, worker_logger
 from .plotting import (
     plot_center_finder,
-    plot_center_finder_fit,
     plot_density_map,
     plot_peak_patch_spectrum,
     plot_pre_center_finder,
@@ -59,7 +58,6 @@ class SpectralConfig:
 def compute_patch_spectra(
     img: xarray.DataArray,
     block_size: int,
-    hres: float,
     block_step: int,
     window: xarray.DataArray,
 ) -> xarray.DataArray:
@@ -67,13 +65,14 @@ def compute_patch_spectra(
 
     Constructs overlapping blocks via a rolling window, applies the FFT
     windowing function, and returns the linear 2-D power spectrum of each
-    block.
+    block.  The horizontal resolution (km per pixel) is inferred from the
+    spacing of ``img.x`` so the resulting ``kx``/``ky`` coords come out in
+    cycles per km.
 
     Args:
-        img: Input image ``DataArray`` with dims ``(x, y)``.
+        img: Input image ``DataArray`` with dims ``(x, y)`` and a uniformly
+            spaced ``x`` coordinate (in km).
         block_size: Edge length (pixels) of each square FFT block.
-        hres: Horizontal resolution of the image (km per pixel); used to set
-            wavenumber coordinates.
         block_step: Stride (in pixels) between consecutive block centres.
         window: FFT windowing array of shape ``(1, 1, block_size, block_size)``.
 
@@ -82,6 +81,7 @@ def compute_patch_spectra(
         ``(px, py, kx, ky)`` where ``px``, ``py`` are spatial patch centres
         and ``kx``, ``ky`` are wavenumbers (cycles km⁻¹).
     """
+    hres = float(np.diff(img.x.values).mean())
     wavenum = make_wavenum_grid(block_size, hres, shift=True)
     patches = make_patches(img, block_size, block_step)
     F = fft_patches(patches, window, Nfft=block_size, shift=True)
@@ -152,7 +152,6 @@ def build_patch_stack(
             compute_patch_spectra(
                 img.image,
                 cfg.block_size,
-                cfg.image_maker.hres,
                 cfg.block_step,
                 cfg.window,
             )
@@ -202,7 +201,6 @@ def build_image_patch_stack(
             compute_patch_spectra(
                 img.image,
                 cfg.block_size,
-                cfg.image_maker.hres,
                 cfg.block_step,
                 cfg.window,
             )
@@ -327,7 +325,6 @@ def _rebuild_slice_at_height(
         p = compute_patch_spectra(
             img.image,
             cfg.block_size,
-            cfg.image_maker.hres,
             cfg.block_step,
             cfg.window,
         )
@@ -584,26 +581,22 @@ def run_spectral_focusing(
     fig.savefig("plots/peak_patch.png")
     plt.close(fig)
 
-    fig, _ = plot_center_finder(init_slice)
+    fig, _ = plot_center_finder(data_focused)
     fig.savefig("plots/center_init.png")
     plt.close(fig)
 
     params = run_smoothed_center_finder(
-        px=init_slice.px.values,
-        py=init_slice.py.values,
-        F=init_slice.F.values,
-        Fx=init_slice.Fx.values,
-        Fy=init_slice.Fy.values,
+        px=data_focused.px.values,
+        py=data_focused.py.values,
+        F=data_focused.F.values,
+        Fx=data_focused.Fx.values,
+        Fy=data_focused.Fy.values,
         sparse_x=sparse_img.x.values,
         sparse_y=sparse_img.y.values,
         sparse_image=sparse_img.image.values.T,
         center_finder=center_finder,
     )
     logger.info("params fit in %d iterations", len(params["history"]["metric"]))
-
-    fig, _ = plot_center_finder_fit([params])
-    fig.savefig("plots/center_finder_fit.png")
-    plt.close(fig)
 
     coord_center = (np.mean(cfg.lat_limits), np.mean(cfg.lon_limits))
     return data_focused.assign(
