@@ -290,6 +290,71 @@ def find_center(
     return center
 
 
+def find_center_grid_search(
+    pts: np.ndarray,
+    vectors: np.ndarray,
+    weights: np.ndarray,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    sigma: float = 100.0,
+    chunk: int = 256,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pick the candidate-grid point that maximizes wavefront-agreement score.
+
+    For each candidate ``(x, y)`` on ``meshgrid(grid_x, grid_y)``, every valid
+    patch contributes ``w * exp(-(perp / sigma) ** 2)``, where ``perp`` is the
+    perpendicular distance from the candidate to the wavefront line passing
+    through the patch (defined by its peak wavevector).  The summed surface is
+    a weighted "wavefronts intersect here" map; its argmax is the seed.
+
+    Args:
+        pts: ``(N, 2)`` patch centre coordinates (tiled across times if any).
+        vectors: ``(N, 2)`` peak wavevector components per patch.
+        weights: ``(N,)`` non-negative weights (e.g. spectral peak power).
+        grid_x: ``(Nx,)`` 1-D candidate-x coordinates.
+        grid_y: ``(Ny,)`` 1-D candidate-y coordinates.
+        sigma: Kernel width (same units as ``pts``); controls how quickly the
+            score falls off with perpendicular distance from a wavefront.
+        chunk: Number of patches processed per inner iteration (memory knob).
+
+    Returns:
+        ``(center, score)`` where ``center`` is the ``(2,)`` argmax location
+        (or ``[nan, nan]`` if no valid patches) and ``score`` is the
+        ``(Ny, Nx)`` score surface.
+    """
+    kmag = np.linalg.norm(vectors, axis=1)
+    mask = (
+        (kmag > 0) & np.isfinite(kmag) & np.isfinite(weights) & (weights > 0)
+    )
+    XD, YD = np.meshgrid(grid_x, grid_y)
+    score = np.zeros(XD.size)
+    if not np.any(mask):
+        return np.array([np.nan, np.nan]), score.reshape(XD.shape)
+
+    pts_m = pts[mask]
+    vec_m = vectors[mask]
+    w_m = weights[mask]
+    k_m = kmag[mask]
+    gx = XD.ravel()
+    gy = YD.ravel()
+
+    for start in range(0, pts_m.shape[0], chunk):
+        end = start + chunk
+        dx = gx[:, None] - pts_m[start:end, 0][None, :]
+        dy = gy[:, None] - pts_m[start:end, 1][None, :]
+        d = np.abs(
+            vec_m[start:end, 0][None, :] * dy
+            - vec_m[start:end, 1][None, :] * dx
+        ) / k_m[start:end][None, :]
+        score += np.sum(
+            w_m[start:end][None, :] * np.exp(-(d / sigma) ** 2), axis=1
+        )
+
+    score = score.reshape(XD.shape)
+    best = int(np.argmax(score))
+    return np.array([gx[best], gy[best]]), score
+
+
 def find_center_huber(
     pts: np.ndarray,
     vectors: np.ndarray,
@@ -339,25 +404,30 @@ def run_smoothed_center_finder(
     sparse_x: np.ndarray,
     sparse_y: np.ndarray,
     sparse_image: np.ndarray,
+    image_x: np.ndarray,
+    image_y: np.ndarray,
     center_finder: Callable,
 ) -> dict[str, Any]:
     """Initialize from a spectral patch field and run a torch center finder.
 
-    Uses :func:`find_center` on the supplied patch wavevectors to seed the
-    centre, takes ``1 / max(|k|)`` as the wavelength seed, and dispatches to
-    ``center_finder`` to refine against the sparse image stack.
+    Seeds the centre via :func:`find_center_grid_search` on the supplied patch
+    wavevectors (evaluated on the image grid), takes ``1 / max(|k|)`` as the
+    wavelength seed, and dispatches to ``center_finder`` to refine against the
+    sparse image stack.
 
     Args:
         px: ``(Px,)`` patch-centre x coordinates.
         py: ``(Py,)`` patch-centre y coordinates.
         F: Peak spectral power, shape ``(Py, Px)`` or ``(T, Py, Px)``. When
             the time axis is present, all time slices are pooled into the
-            seed LSQ.
+            seed search.
         Fx: Peak wavenumber x-component, same shape as ``F``.
         Fy: Peak wavenumber y-component, same shape as ``F``.
         sparse_x: ``(N,)`` x coordinates of the sparse image pixels.
         sparse_y: ``(N,)`` y coordinates of the sparse image pixels.
         sparse_image: ``(N, T)`` sparse image values across ``T`` time steps.
+        image_x: ``(Nx,)`` 1-D image x grid used as the centre-search domain.
+        image_y: ``(Ny,)`` 1-D image y grid used as the centre-search domain.
         center_finder: Callable ``(c0, w0, x, y, image) -> dict`` (typically
             :func:`run_stationary_center_finder`, partial-bound via Hydra).
 
@@ -376,6 +446,6 @@ def run_smoothed_center_finder(
     vectors = np.column_stack([Fx.ravel(), Fy.ravel()])
     weights = F.ravel()
     k = np.hypot(vectors[:, 0], vectors[:, 1])
-    c0 = find_center_huber(pts, vectors, weights)
+    c0, _ = find_center_grid_search(pts, vectors, weights, image_x, image_y)
     w0 = 1 / np.nanmax(k)
     return center_finder(c0, w0, sparse_x, sparse_y, sparse_image)

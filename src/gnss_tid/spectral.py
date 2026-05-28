@@ -576,8 +576,8 @@ def run_spectral_focusing(
     init_slice = data_focused.isel(time=data_focused.objective.argmax())
 
     # Persist diagnostic inputs before plotting so they survive plot failures.
-    init_slice.reset_coords().to_netcdf("plots/init_slice.nc")
-    sparse_img.reset_coords().to_netcdf("plots/sparse_img.nc")
+    # init_slice.reset_coords().to_netcdf("plots/init_slice.nc")
+    # sparse_img.reset_coords().to_netcdf("plots/sparse_img.nc")
     logger.info(
         "init_slice diagnostics | time=%s height=%s objective=%s F max=%s",
         np.datetime_as_string(init_slice.time.values, unit="s"),
@@ -611,6 +611,8 @@ def run_spectral_focusing(
         sparse_x=sparse_img.x.values,
         sparse_y=sparse_img.y.values,
         sparse_image=sparse_img.image.values.T,
+        image_x=data_focused.x.values,
+        image_y=data_focused.y.values,
         center_finder=center_finder,
     )
     logger.info("params fit in %d iterations", len(params["history"]["metric"]))

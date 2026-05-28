@@ -6,7 +6,7 @@ from matplotlib.axes import Axes
 from scipy.ndimage import maximum_filter1d
 from tqdm import autonotebook
 
-from .center_finding import find_center, find_center_huber
+from .center_finding import find_center, find_center_grid_search, find_center_huber
 
 
 def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):
@@ -120,31 +120,10 @@ def plot_center_finder(data):
     cw = find_center(pts, vectors, weights)
     cu = find_center(pts, vectors, np.ones_like(weights))
     ch = find_center_huber(pts, vectors, weights)
-
+    cg, dw = find_center_grid_search(
+        pts, vectors, weights, data.x.values, data.y.values
+    )
     XD, YD = np.meshgrid(data.x.values, data.y.values)
-    # Δx, Δy are time-independent because patch positions are shared across
-    # time. Precompute once, then accumulate the kernel sum per slice.
-    dx = XD.ravel()[:, None] - pts_single[:, 0][None, :]
-    dy = YD.ravel()[:, None] - pts_single[:, 1][None, :]
-
-    dw = np.zeros(XD.size)
-    for t in range(T):
-        Fx_t = Fx_all[t].ravel()
-        Fy_t = Fy_all[t].ravel()
-        F_t = F_all[t].ravel()
-        kmag = np.hypot(Fx_t, Fy_t)
-        mask = (kmag > 0) & np.isfinite(kmag) & np.isfinite(F_t) & (F_t > 0)
-        if not np.any(mask):
-            continue
-        num = np.abs(
-            Fx_t[mask][None, :] * dy[:, mask] - Fy_t[mask][None, :] * dx[:, mask]
-        )
-        d = num / kmag[mask][None, :]
-        dw += np.sum(F_t[mask][None, :] * np.exp(-(d / 100) ** 2), axis=1)
-
-    dw = dw.reshape(XD.shape)
-    cg_idx = int(np.argmax(dw))
-    cg = np.array([XD.ravel()[cg_idx], YD.ravel()[cg_idx]])
 
     init_slice = data.isel(time=data.objective.argmax())
 
