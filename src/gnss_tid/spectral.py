@@ -20,6 +20,73 @@ from .utils import find_center
 
 logger = logging.getLogger(__name__)
 
+def quadratic_peak_2d(arr: np.ndarray):
+    """
+    Find a subpixel peak in a 2D array using a local quadratic fit.
+
+    Returns
+    -------
+    row_peak : float
+        Refined peak row coordinate.
+    col_peak : float
+        Refined peak column coordinate.
+    peak_value : float
+        Quadratic peak value at the refined location.
+
+    Notes
+    -----
+    - Uses the global maximum as the initial peak.
+    - Fits a quadratic surface to the 3x3 neighborhood around that peak:
+        z = a x^2 + b y^2 + c x y + d x + e y + f
+    - Coordinates are returned in array index space (row, col).
+    - If the peak is on an edge or the quadratic fit is degenerate,
+      it falls back to the integer argmax location.
+    """
+
+    # Find a loca area around the peak
+    r0, c0 = np.unravel_index(np.argmax(arr), arr.shape)
+    patch = arr[r0-1 : r0+2, c0-1 : c0+2]
+
+    # Local coordinates around the center pixel
+    xs, ys = np.meshgrid([-1, 0, 1], [-1, 0, 1])
+    x = xs.ravel()
+    y = ys.ravel()
+    z = patch.ravel()
+
+    # Quadratic model: z = a x^2 + b y^2 + c x y + d x + e y + f
+    A = np.column_stack([x**2, y**2, x*y, x, y, np.ones_like(x)])
+    coeffs, *_ = np.linalg.lstsq(A, z, rcond=None)
+    a, b, c, d, e, f = coeffs
+
+    # Solve gradient = 0:
+    # 2a x + c y + d = 0
+    # c x + 2b y + e = 0
+    H = np.array([[2*a, c],
+                  [c, 2*b]], dtype=float)
+    g = np.array([-d, -e], dtype=float)
+
+    try:
+        xy = np.linalg.solve(H, g)
+    except np.linalg.LinAlgError:
+        return float(r0), float(c0), float(arr[r0, c0])
+
+    x_peak, y_peak = xy  # local coordinates in patch space
+
+    # Convert back to array coordinates: x corresponds to column, y to row
+    col_peak = c0 + x_peak
+    row_peak = r0 + y_peak
+
+    # Optional: compute refined peak value from the quadratic surface
+    peak_value = (
+        a * x_peak**2 +
+        b * y_peak**2 +
+        c * x_peak * y_peak +
+        d * x_peak +
+        e * y_peak +
+        f
+    )
+
+    return float(row_peak), float(col_peak), float(peak_value)
 
 def configure_worker_logger(log_queue=None, log_level=logging.INFO):
     if log_queue is None:

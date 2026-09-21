@@ -4,6 +4,12 @@ from dateutil import parser
 import numpy as np
 import multiprocessing as mp
 from argparse import ArgumentParser
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
 ppy = 'plot_save_all.py'
 
@@ -39,8 +45,10 @@ def main(folder, times, skip, j, jj):
     for i,t in enumerate(all_dates):
         args.append((ppy, f"{folder}{t.strftime('%Y/%m%d/')}", kwargs))
 
+    mp.set_start_method("spawn", force=True)
     with mp.Pool(processes=j) as pool:
         pool.starmap(do_one, args)
+
     # print (f"python {ppy} {f} {kwargs}")
     #subprocess.call(f"python {ppy} {f} {kwargs}", shell=True, timeout=60*60*2)
 

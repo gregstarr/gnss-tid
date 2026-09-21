@@ -9,6 +9,12 @@ from argparse import ArgumentParser
 import matplotlib.pyplot as plt
 import warnings, re
 
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+
 warnings.filterwarnings('ignore')
 
 def getNeighbours(image,i,j,N=3):
@@ -193,7 +199,16 @@ def ImageNew(glon, glat, tid, variance,
         imout = fillPixels(imout)
 
     return xgrid, ygrid, imout, varout, cnt
-        
+
+def getMappingFunction(el, h):
+    
+    Re = 6371.0
+    rc1 = (Re / (Re + h))
+    arg = rc1 * np.cos(np.radians(el))
+    F = np.cos(np.arcsin(arg))
+#    F = np.sqrt(1 - (np.cos(np.radians(el))**2 * rc1**2))
+    return np.array(F)
+
 def main(P):
   folder = P.folder+os.sep #"/disk1/tid/sharon/poly/2025/0925/"
   latlim = P.latlim #[-90, 90]
@@ -260,14 +275,16 @@ def main(P):
     #                                             point_data.tec_noise.values, 
     #                                             latlim=latlim, lonlim=lonlim, res=res, filter_type='gaussian', 
     #                                             filter_size=filter_size3, sigma=sigma3)
-    
+    F = getMappingFunction(point_data.el.values, h=450)
+    vtec = point_data.stec.values * F
     O = xr.Dataset(coords={#"lon": (["lat","lon"], xgrid), "lat": (["lat","lon"], ygrid),
                        "ipp_lon": point_data.lon.values, "ipp_lat": point_data.lat.values,
                        },
                   data_vars={"dtec30": (["ipp"], point_data.dtec1.values),
                              "dtec60": (["ipp"], point_data.dtec2.values),
                              "dtec90": (["ipp"], point_data.dtec3.values),
-			     "roti": (["ipp"], point_data.roti.values),
+			                 "roti": (["ipp"], point_data.roti.values),
+                             "vtec": (["ipp"], point_data.roti.values),
                             #  "dtec30grid": (["lat", "lon"], imout1),
                             #  "dtec60grid": (["lat", "lon"], imout2),
                             #  "dtec90grid": (["lat", "lon"], imout3),

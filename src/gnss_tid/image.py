@@ -103,7 +103,7 @@ class ScipyRbfImageMaker:
         img = img.reshape(self.shape)
 
         img[np.isnan(img)] = 0
-        img = filters.butterworth(img, self.hp_freq, high_pass=True)
+        # img = filters.butterworth(img, self.hp_freq, high_pass=True)
         img = xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
         w = self.get_data_density(x, y, self.neighbor_radius)
         return xarray.Dataset({"image": img, "density": w})

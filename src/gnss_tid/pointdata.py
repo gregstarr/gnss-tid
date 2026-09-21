@@ -131,6 +131,9 @@ class PointData:
                 dtecp:      float64
                 tec_noise:  float64
                 tec_snr:    float64
+                stec:       float64
+                roti:       float64
+            Coordinates:
                 rx:         int64
                 sv:         object
                 lat:        float32
@@ -150,7 +153,7 @@ class PointData:
             .groupby("los_id").mean()
             .assign_attrs(time=self.times[time_slice.start], height=h)
         )
-        for v in ["dtec0", "dtec1", "dtec3", "dtecp"]:
+        for v in ["dtec0", "dtec1", "dtec3", "dtecp", "stec", "roti"]:
             z = abs(data[v])
             data[v] = data[v].where(z < z.quantile(self.q_thresh).drop_vars("quantile"))
 
@@ -241,6 +244,7 @@ def load_file(
     dtec2 = f.dtec2.values.astype(float)[valid]
     dtec3 = f.dtec3.values.astype(float)[valid]
     dtecp = f.dtecp.values.astype(float)[valid]
+    stec = f.stec.values.astype(float)[valid]
     roti = f.roti.values.astype(float)[valid]
     tec_snr  = f.snr.values.astype(float)[valid]
     sv = sv[valid]
@@ -257,6 +261,7 @@ def load_file(
             "roti": ("n", roti),
             "tec_noise": ("n", tec_noise),
             "tec_snr": ("n", tec_snr),
+            "stec": ("n", stec),
             "sv": ("n", sv),
             "time": ("n", time),
         },
@@ -280,7 +285,7 @@ def load_file(
         unique_valid_svs=np.unique(sv),
         unique_svs=np.unique(f.sv.values),
     )
-    for v in ["dtec0", "dtec1", "dtec2", "dtec3", "dtecp", "roti"]:
+    for v in ["dtec0", "dtec1", "dtec2", "dtec3", "dtecp", "roti", "stec"]:
         debug[f"{v}_null_sum"] = data[v].isnull().sum().item()
         debug[f"{v}_null_mean"] = data[v].isnull().mean().item()
 
