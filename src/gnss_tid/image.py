@@ -203,7 +203,7 @@ def _build_image_for_slice(
         return result
 
 
-def generate_image_stack(
+def generate_time_stack(
     obs: pd.DataFrame,
     rx: pd.DataFrame,
     image_maker: ImageMakerBase,
@@ -354,3 +354,56 @@ def generate_image_cube(
         .reindex(time=times, height=height_arr)
         .transpose("time", "height", "y", "x")
     )
+
+
+def generate_height_stack(
+    obs: pd.DataFrame,
+    rx: pd.DataFrame,
+    image_maker: ImageMakerBase,
+    time_window: TimeWindow,
+    heights: list[float] | np.ndarray,
+    tec_name: str,
+    lat_limits: tuple[float, float],
+    lon_limits: tuple[float, float],
+    proj: Local2D,
+    n_jobs: int,
+    pbar: bool = False,
+) -> xarray.Dataset:
+    """Build images at a set of IPP heights for one time window.
+
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        image_maker: Image maker initialized with the same projection as ``proj``.
+        time_window: Single time window to retrieve.
+        heights: Nonempty 1-D sequence of unique, finite IPP heights in km.
+        tec_name: Name of the TEC variable in the observation data.
+        lat_limits: ``(min_lat, max_lat)`` bounds for data retrieval.
+        lon_limits: ``(min_lon, max_lon)`` bounds for data retrieval.
+        proj: Shared local-cartesian projection used to initialize ``image_maker``.
+        n_jobs: Number of parallel worker processes.
+        pbar: Whether to display a tqdm progress bar (default False).
+
+    Returns:
+        Dataset with ``image`` and ``density`` on ``(height, y, x)``, IPP height
+        coordinates in input order, spatial grid coordinates, and a scalar
+        ``time`` coordinate equal to the window start. Failed retrievals are
+        filled with NaN, as in :func:`generate_image_cube`.
+
+    Raises:
+        ValueError: If heights are empty, duplicated, nonfinite, or not 1-D.
+        RuntimeError: If data retrieval failed at every height.
+    """
+    return generate_image_cube(
+        obs=obs,
+        rx=rx,
+        image_maker=image_maker,
+        time_windows=[time_window],
+        heights=heights,
+        tec_name=tec_name,
+        lat_limits=lat_limits,
+        lon_limits=lon_limits,
+        proj=proj,
+        n_jobs=n_jobs,
+        pbar=pbar,
+    ).squeeze("time")

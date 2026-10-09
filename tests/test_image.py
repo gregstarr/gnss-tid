@@ -190,7 +190,7 @@ def test_generate_image_cube_rejects_invalid_windows(cube_inputs, duplicate):
     retrieval.assert_not_called()
 
 
-def test_generate_image_stack_keeps_paired_height_semantics(cube_inputs):
+def test_generate_time_stack_keeps_paired_height_semantics(cube_inputs):
     """Verify the existing stack still generates one paired height per window.
 
     Args:
@@ -200,7 +200,7 @@ def test_generate_image_stack_keeps_paired_height_semantics(cube_inputs):
         None; asserts paired task count, dimensions, and image values.
     """
     kwargs, retrieval = cube_inputs
-    stack = image.generate_image_stack(**kwargs)
+    stack = image.generate_time_stack(**kwargs)
     assert retrieval.call_count == 2
     assert stack.image.dims == ("time", "y", "x")
     assert stack.height.dims == ("time",)
@@ -241,7 +241,7 @@ def test_image_progress(cube_inputs, monkeypatch, kind, total, pbar, failures):
 
     tqdm = Mock()
     monkeypatch.setattr(parallel_logging, "tqdm", tqdm)
-    generate = getattr(image, f"generate_image_{kind}")
+    generate = image.generate_time_stack if kind == "stack" else image.generate_image_cube
     if failures == "all":
         with pytest.raises(RuntimeError, match="no valid slices"):
             generate(**kwargs, pbar=pbar)
@@ -298,3 +298,68 @@ def test_worker_channels_optional_progress(monkeypatch, pbar):
     else:
         progress.assert_called_once_with(2, "test")
         progress_queue.put.assert_called_once_with(1)
+
+
+@pytest.mark.parametrize("n_heights", [1, 2])
+@pytest.mark.parametrize("pbar", [False, True])
+def test_generate_height_stack(cube_inputs, monkeypatch, n_heights, pbar):
+    """Verify the height stack matches a single-window cube.
+
+    Args:
+        cube_inputs: Image arguments and retrieval mock.
+        monkeypatch: Pytest fixture replacing the progress display.
+        n_heights: Number of requested heights.
+        pbar: Whether to enable progress reporting.
+
+    Returns:
+        None; asserts output values, axis order, scalar time, and progress total.
+    """
+    kwargs, retrieval = cube_inputs
+    window = kwargs.pop("time_windows")[1]
+    kwargs["heights"] = kwargs["heights"][:n_heights]
+    tqdm = Mock()
+    monkeypatch.setattr(parallel_logging, "tqdm", tqdm)
+
+    result = image.generate_height_stack(**kwargs, time_window=window, pbar=pbar)
+
+    assert retrieval.call_count == n_heights
+    assert result.image.dims == result.density.dims == ("height", "y", "x")
+    assert result.time.dims == ()
+    assert result.time.values == window.start_time
+    np.testing.assert_array_equal(result.height, kwargs["heights"])
+    np.testing.assert_array_equal(result.image[:, 0, 0], np.array([351, 251])[:n_heights])
+    if pbar:
+        assert tqdm.call_args.kwargs["total"] == n_heights
+    else:
+        tqdm.assert_not_called()
+    expected = image.generate_image_cube(**kwargs, time_windows=[window]).squeeze("time")
+    xarray.testing.assert_identical(result, expected)
+
+
+@pytest.mark.parametrize("all_failed", [False, True])
+def test_generate_height_stack_failed_retrievals(cube_inputs, all_failed):
+    """Verify the wrapper preserves cube failure handling.
+
+    Args:
+        cube_inputs: Image arguments and retrieval mock.
+        all_failed: Whether both heights fail rather than just the first.
+
+    Returns:
+        None; asserts missing heights remain NaN or all-failed generation raises.
+    """
+    kwargs, retrieval = cube_inputs
+    window = kwargs.pop("time_windows")[0]
+    fetch = retrieval.side_effect
+    retrieval.side_effect = [
+        None,
+        None if all_failed else fetch(None, None, window, 250.0, None, None, None),
+    ]
+    if all_failed:
+        with pytest.raises(RuntimeError, match="no valid slices"):
+            image.generate_height_stack(**kwargs, time_window=window)
+    else:
+        result = image.generate_height_stack(**kwargs, time_window=window)
+        np.testing.assert_array_equal(result.height, kwargs["heights"])
+        assert result.sel(height=350).image.isnull().all()
+        assert result.sel(height=350).density.isnull().all()
+        assert (result.sel(height=250).image == 250).all()

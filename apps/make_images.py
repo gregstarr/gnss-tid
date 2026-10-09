@@ -18,15 +18,13 @@ from matplotlib import pyplot as plt
 from omegaconf import DictConfig
 
 from gnss_tid.coords import Local2D
-from gnss_tid.image import generate_image_stack
+from gnss_tid.image import generate_time_stack
 from gnss_tid.pointdata import load_observations, make_time_windows
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_heights(
-    cfg: DictConfig, time_windows
-) -> tuple[float | np.ndarray, float]:
+def _resolve_heights(cfg: DictConfig, time_windows) -> tuple[float | np.ndarray, float]:
     """Return ``(heights, init_height)`` where ``heights`` is scalar or per-window.
 
     ``init_height`` is the representative height passed to
@@ -56,9 +54,7 @@ def _write_pngs(images: xarray.Dataset, out_dir: Path) -> None:
         frame = images.isel(time=ii)
         fig, ax = plt.subplots(figsize=(6, 6), tight_layout=True)
         frame.image.plot(ax=ax)
-        ax.set_title(
-            f"t={frame.time.values}  h={float(frame.height):.0f} km"
-        )
+        ax.set_title(f"t={frame.time.values}  h={float(frame.height):.0f} km")
         fig.savefig(out_dir / f"frame_{ii:04d}.png")
         plt.close(fig)
 
@@ -90,15 +86,15 @@ def main(cfg: DictConfig):
 
         image_maker = hydra.utils.instantiate(cfg.image_maker)
 
-        time_windows = make_time_windows(
-            obs["time"], cfg.sample.window, cfg.sample.step
-        )
+        time_windows = make_time_windows(obs["time"], cfg.sample.window, cfg.sample.step)
         logger.info("built %d time windows", len(time_windows))
 
         heights, init_height = _resolve_heights(cfg, time_windows)
         logger.info(
             "height source: %s (init_height=%.1f km)",
-            "per-timestep" if isinstance(heights, np.ndarray) else f"constant {heights:.1f} km",
+            "per-timestep"
+            if isinstance(heights, np.ndarray)
+            else f"constant {heights:.1f} km",
             init_height,
         )
 
@@ -114,7 +110,7 @@ def main(cfg: DictConfig):
             lon_limits=lon_limits,
         )
 
-        images = generate_image_stack(
+        images = generate_time_stack(
             obs=obs,
             rx=rx,
             image_maker=image_maker,
