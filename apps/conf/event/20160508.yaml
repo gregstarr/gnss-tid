@@ -1,0 +1,14 @@
+files:
+  - /disk1/tid/2016/0508/*.nc
+latitude_limits:
+  - 24.0
+  - 51.0
+longitude_limits:
+  - -126.0
+  - -70.0
+time_limits:
+  - "20160508_030000"
+  - "20160508_100000"
+el_min: 30
+q_thresh: 0.99
+n_jobs: 16

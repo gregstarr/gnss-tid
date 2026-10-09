@@ -1,0 +1,14 @@
+files:
+  - /disk1/tid/2021/0101/*.nc
+latitude_limits:
+  - 24.0
+  - 51.0
+longitude_limits:
+  - -126.0
+  - -70.0
+time_limits:
+  - "20210101_180000"
+  - "20210102_120000"
+el_min: 30
+q_thresh: 0.99
+n_jobs: 16
