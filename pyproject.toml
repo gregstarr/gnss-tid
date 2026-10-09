@@ -3,20 +3,16 @@ name = "gnss-tid"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "argon2-cffi-bindings<25.1",
-    "bokeh>=3.8.1",
     "cartopy<0.25",
-    "colorcet>=3.1.0",
     "contourpy<1.3",
     "dask[distributed]>=2025.12.0",
     "georinex>=1.16.2",
     "h5netcdf>=1.7.3",
     "h5py<3.15",
-    "holoviews>=1.22.1",
     "hydra-core>=1.3.2",
-    "jupyter>=1.1.1",
     "matplotlib>=3.10.8",
     "metpy>=1.7.1",
     "numpy<2.2",
@@ -24,23 +20,35 @@ dependencies = [
     "pymap3d>=3.2.0",
     "pyproj<3.7",
     "pyzmq<27.0",
-    "ruff>=0.15.14",
     "scikit-image>=0.25.2",
     "scikit-learn<1.8",
     "scipy>=1.16.3",
     "seaborn>=0.13.2",
-    "torch<2.7",
+    "torch>=2.14.1",
     "tqdm-joblib>=0.0.5",
     "xarray>=2025.12.0",
     "zarr>3",
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.12.24,<0.13"]
+build-backend = "uv_build"
 
-[tool.hatch.build]
-packages = ["src/gnss_tid"]
+[dependency-groups]
+dev = [
+    "nb-clean>=4.0.1",
+    "pytest>=9.0.3",
+    "bokeh>=3.8.1",
+    "colorcet>=3.1.0",
+    "holoviews>=1.22.1",
+    "ipykernel>=7.4.0",
+    "ipywidgets>=8.1.9",
+    "jupyter-bokeh>=4.1.0",
+    "ruff>=0.16.10",
+]
+
+[tool.uv]
+build-constraint-dependencies = ["numpy<2.3"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -49,17 +57,8 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cpu" },
 ]
-
-[dependency-groups]
-dev = [
-    "nb-clean>=4.0.1",
-    "pytest>=9.0.3",
-]
-
-[tool.uv]
-build-constraint-dependencies = ["numpy<2.3"]
 
 [tool.ruff]
 line-length = 90

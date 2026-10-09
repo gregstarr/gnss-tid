@@ -11,7 +11,7 @@ from skimage import filters
 from sklearn.metrics import pairwise_distances
 
 from .coords import Local2D
-from .parallel_logging import WorkerChannel, log_queue_listener
+from .parallel_logging import WorkerChannel, worker_channels
 from .pointdata import TimeWindow, get_data
 
 logger = logging.getLogger(__name__)
@@ -154,9 +154,7 @@ def generate_image(
     Returns:
         A ``Dataset`` with variables ``image (y, x)`` and ``density (y, x)``.
     """
-    return image_maker(
-        data["x"].values, data["y"].values, data[tec_name].values
-    )
+    return image_maker(data["x"].values, data["y"].values, data[tec_name].values)
 
 
 def _build_image_for_slice(
@@ -173,19 +171,36 @@ def _build_image_for_slice(
 ) -> xarray.Dataset | None:
     """Fetch one time window and build its image at the given height.
 
-    Returns a ``Dataset`` expanded along ``time`` (= ``ts.start_time``) with a
-    ``height`` coord, or ``None`` if data retrieval failed.
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        ts: Time window to retrieve.
+        height: IPP height in km.
+        image_maker: Initialized image maker.
+        tec_name: TEC column to interpolate.
+        lat_limits: Latitude bounds for retrieval.
+        lon_limits: Longitude bounds for retrieval.
+        proj: Shared local-cartesian projection.
+        ch: Optional worker logging and progress channel.
+
+    Returns:
+        Dataset with image and density on (time, y, x), spatial grid coords,
+        time equal to ts.start_time, and height(time), or None if retrieval
+        failed. Reports one progress tick for each successful or skipped slice.
     """
-    with (ch or WorkerChannel()) as ch:
+    with ch or WorkerChannel() as ch:
         ch.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
         data = get_data(obs, rx, ts, height, lat_limits, lon_limits, proj=proj)
         if data is None:
             ch.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
+            ch.report()
             return None
         img = generate_image(data, image_maker, tec_name)
-        return img.expand_dims(time=[ts.start_time]).assign_coords(
+        result = img.expand_dims(time=[ts.start_time]).assign_coords(
             height=("time", [height])
         )
+        ch.report()
+        return result
 
 
 def generate_image_stack(
@@ -199,6 +214,7 @@ def generate_image_stack(
     lon_limits: tuple[float, float],
     proj: Local2D,
     n_jobs: int,
+    pbar: bool = False,
 ) -> xarray.Dataset:
     """Build an image for each time window in parallel.
 
@@ -218,18 +234,32 @@ def generate_image_stack(
         proj: Shared local-cartesian projection; must match the one used to
             initialize ``image_maker``.
         n_jobs: Number of parallel worker processes.
+        pbar: Whether to display a tqdm progress bar (default False). Counts
+            completed windows, including failed retrievals.
 
     Returns:
         A ``Dataset`` concatenated along ``time`` with variables ``image``,
         ``density``, and ``height(time)``.  Failed slices are dropped.
     """
     height_arr = np.broadcast_to(np.asarray(heights), (len(time_windows),))
-    with log_queue_listener() as q, Parallel(n_jobs=n_jobs) as parallel:
-        ch = WorkerChannel(log_queue=q)
+    with (
+        worker_channels(
+            len(time_windows), desc="Generating image stack", pbar=pbar
+        ) as ch,
+        Parallel(n_jobs=n_jobs) as parallel,
+    ):
         results = parallel(
             delayed(_build_image_for_slice)(
-                obs, rx, ts, float(h), image_maker, tec_name,
-                lat_limits, lon_limits, proj, ch,
+                obs,
+                rx,
+                ts,
+                float(h),
+                image_maker,
+                tec_name,
+                lat_limits,
+                lon_limits,
+                proj,
+                ch,
             )
             for ts, h in zip(time_windows, height_arr, strict=True)
         )
@@ -237,3 +267,90 @@ def generate_image_stack(
     if not valid:
         raise RuntimeError("image generation produced no valid slices")
     return xarray.concat(valid, dim="time")
+
+
+def generate_image_cube(
+    obs: pd.DataFrame,
+    rx: pd.DataFrame,
+    image_maker: ImageMakerBase,
+    time_windows: list[TimeWindow],
+    heights: list[float] | np.ndarray,
+    tec_name: str,
+    lat_limits: tuple[float, float],
+    lon_limits: tuple[float, float],
+    proj: Local2D,
+    n_jobs: int,
+    pbar: bool = False,
+) -> xarray.Dataset:
+    """Build images for every combination of time window and IPP height.
+
+    Args:
+        obs: Observation DataFrame.
+        rx: Receiver lookup DataFrame.
+        image_maker: Image maker initialized with the same projection as ``proj``.
+        time_windows: Nonempty list of windows with unique start times.
+        heights: Nonempty 1-D sequence of unique, finite IPP heights in km.
+        tec_name: Name of the TEC variable in the observation data.
+        lat_limits: ``(min_lat, max_lat)`` bounds for data retrieval.
+        lon_limits: ``(min_lon, max_lon)`` bounds for data retrieval.
+        proj: Shared local-cartesian projection used to initialize ``image_maker``.
+        n_jobs: Number of parallel worker processes.
+        pbar: Whether to display a tqdm progress bar (default False). Counts
+            completed time-height combinations, including failed retrievals.
+
+    Returns:
+        Dataset with ``image`` and ``density`` on dimensions
+        ``(time, height, y, x)``. Coordinates are window start times, IPP heights
+        in km, and the image-maker's spatial grid. Time and height retain their
+        input order, including slices whose retrieval failed, filled with NaN.
+
+    Raises:
+        ValueError: If either axis is empty or contains duplicates, or heights
+            are not a finite 1-D sequence.
+        RuntimeError: If data retrieval failed for every combination.
+    """
+    height_arr = np.asarray(heights, dtype=float)
+    if height_arr.ndim != 1 or not height_arr.size or not np.isfinite(height_arr).all():
+        raise ValueError("heights must be a nonempty, finite 1-D sequence")
+    if np.unique(height_arr).size != height_arr.size:
+        raise ValueError("heights must be unique")
+    times = np.asarray([ts.start_time for ts in time_windows])
+    if not times.size:
+        raise ValueError("time_windows must be nonempty")
+    if np.unique(times).size != times.size:
+        raise ValueError("time_windows must have unique start times")
+
+    with (
+        worker_channels(
+            len(time_windows) * len(height_arr), desc="Generating image cube", pbar=pbar
+        ) as ch,
+        Parallel(n_jobs=n_jobs) as parallel,
+    ):
+        results = parallel(
+            delayed(_build_image_for_slice)(
+                obs,
+                rx,
+                ts,
+                float(h),
+                image_maker,
+                tec_name,
+                lat_limits,
+                lon_limits,
+                proj,
+                ch,
+            )
+            for ts in time_windows
+            for h in height_arr
+        )
+    valid = [r for r in results if r is not None]
+    if not valid:
+        raise RuntimeError("image generation produced no valid slices")
+
+    stack = xarray.concat(valid, dim="time").rename(time="sample")
+    return (
+        stack.assign_coords(time=("sample", stack["sample"].values))
+        .set_index(sample=["time", "height"])
+        .unstack("sample")
+        .reindex(time=times, height=height_arr)
+        .transpose("time", "height", "y", "x")
+    )

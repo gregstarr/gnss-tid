@@ -2,6 +2,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,12 @@ from .plotting import (
 from .pointdata import TimeWindow, get_data, make_time_windows
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt_dt(dt: np.datetime64) -> str:
+    """Format np.datetime64 as HH:MM:SS for log messages."""
+    s = str(dt)
+    return s.split("T")[1][:8] if "T" in s else s
 
 
 @dataclass(frozen=True)
@@ -137,13 +144,13 @@ def build_patch_stack(
     ch = ch or WorkerChannel()
     patches = []
     for height in heights:
-        ch.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
+        ch.info("[%s - %s]: height = %.1f", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time), height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
-            ch.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
+            ch.warning("[%s - %s]: FAIL", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time))
             return None
         img = generate_image(data, cfg.image_maker, cfg.tec_name)
         patches.append(
@@ -185,13 +192,13 @@ def build_image_patch_stack(
     patches = []
     npts = []
     for height in heights:
-        ch.info("[%s-%s]: height = %.1f", ts.start_time, ts.end_time, height)
+        ch.info("[%s - %s]: height = %.1f", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time), height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
-            ch.warning("[%s-%s]: FAIL", ts.start_time, ts.end_time)
+            ch.warning("[%s - %s]: FAIL", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time))
             return None
         npts.append(len(data))
         img = generate_image(data, cfg.image_maker, cfg.tec_name)
@@ -234,7 +241,7 @@ def compute_height_objectives_for_slice(
         or ``None`` if data retrieval failed for any height.
     """
     with (ch or WorkerChannel()) as ch:
-        ch.info("[%s-%s]: processing heights", ts.start_time, ts.end_time)
+        ch.info("[%s - %s]: processing heights", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time))
         patches = build_patch_stack(ts, heights, cfg, ch=ch)
         if patches is None:
             return None
@@ -275,7 +282,7 @@ def _select_best_height_for_slice(
         Returns ``None`` if data retrieval failed for any height.
     """
     with (ch or WorkerChannel()) as ch:
-        ch.info("[%s-%s]: single-pass slice", ts.start_time, ts.end_time)
+        ch.info("[%s - %s]: single-pass slice", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time))
         data_all = build_image_patch_stack(ts, heights, cfg, ch=ch)
         if data_all is None:
             return None
@@ -315,7 +322,7 @@ def _rebuild_slice_at_height(
         expanded along ``time``, or ``None`` if data retrieval failed.
     """
     with (ch or WorkerChannel()) as ch:
-        ch.info("focused slice time=%s height=%.1f", time, height)
+        ch.info("focused slice time=%s height=%.1f", _fmt_dt(time), height)
         data = get_data(
             cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
             proj=cfg.proj,
@@ -416,6 +423,7 @@ def _focus_with_time_smoothing(
         "run_spectral_focusing: first pass (objectives), n_jobs=%d", n_jobs
     )
     total_pass1 = len(time_windows) * len(heights)
+    t_pass1_start = perf_counter()
     with (
         worker_channels(total_pass1, desc="focus pass 1 (objectives)") as ch,
         Parallel(n_jobs=n_jobs) as parallel,
@@ -426,6 +434,7 @@ def _focus_with_time_smoothing(
             )
             for ts, time in zip(time_windows, times, strict=True)
         )
+    logger.info("pass 1 done in %.1f s", perf_counter() - t_pass1_start)
 
     obj_data = xarray.concat(
         filter(lambda x: x is not None, objectives), dim="time"
@@ -461,6 +470,7 @@ def _focus_with_time_smoothing(
         len(second_pass_inputs),
         len(time_windows),
     )
+    t_pass2_start = perf_counter()
     with (
         worker_channels(
             len(second_pass_inputs), desc="focus pass 2 (reconstruction)"
@@ -471,6 +481,7 @@ def _focus_with_time_smoothing(
             delayed(_rebuild_slice_at_height)(ts, time, height, cfg, ch)
             for ts, time, height in second_pass_inputs
         )
+    logger.info("pass 2 done in %.1f s", perf_counter() - t_pass2_start)
 
     valid_slices = [s for s in focused_slices if s is not None]
     if not valid_slices:
@@ -562,10 +573,13 @@ def run_spectral_focusing(
     times = [w.start_time for w in time_windows]
     Path("plots").mkdir(exist_ok=True)
 
+    t_total_start = perf_counter()
     if time_window == 1:
+        t_pass_start = perf_counter()
         data_focused = _focus_per_slice(
             time_windows, times, heights, cfg, n_jobs
         )
+        logger.info("single pass done in %.1f s", perf_counter() - t_pass_start)
     else:
         data_focused = _focus_with_time_smoothing(
             time_windows, times, heights, cfg, n_jobs, time_window
@@ -586,7 +600,7 @@ def run_spectral_focusing(
         float(np.nanmax(init_slice.F.values)),
     )
 
-    fig, _ = plot_pre_center_finder(init_slice)
+    fig, _ = plot_pre_center_finder(init_slice, density_thresh=density_thresh)
     fig.savefig("plots/pre_center_finder.png")
     plt.close(fig)
 
@@ -598,10 +612,11 @@ def run_spectral_focusing(
     fig.savefig("plots/peak_patch.png")
     plt.close(fig)
 
-    fig, _ = plot_center_finder(data_focused)
+    fig, _ = plot_center_finder(data_focused, density_thresh=density_thresh)
     fig.savefig("plots/center_init.png")
     plt.close(fig)
 
+    t_center_start = perf_counter()
     params = run_smoothed_center_finder(
         px=data_focused.px.values,
         py=data_focused.py.values,
@@ -615,7 +630,12 @@ def run_spectral_focusing(
         image_y=data_focused.y.values,
         center_finder=center_finder,
     )
-    logger.info("params fit in %d iterations", len(params["history"]["metric"]))
+    logger.info(
+        "center finding done in %.1f s (%d iterations)",
+        perf_counter() - t_center_start,
+        len(params["history"]["metric"]),
+    )
+    logger.info("total time: %.1f s", perf_counter() - t_total_start)
 
     coord_center = (np.mean(cfg.lat_limits), np.mean(cfg.lon_limits))
     return data_focused.assign(

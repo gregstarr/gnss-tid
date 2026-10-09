@@ -40,14 +40,14 @@ no-op, so the same worker body works in serial callers that pass ``None``.
 
 import logging
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from logging.handlers import QueueHandler, QueueListener
 from multiprocessing import Manager
 from os import getpid
 from typing import Any
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 logger = logging.getLogger(__name__)
@@ -144,17 +144,23 @@ def progress_queue_listener(total: int, desc: str):
 
 
 @contextmanager
-def worker_channels(total: int, desc: str):
-    """Open both listeners together and yield a populated ``WorkerChannel``.
+def worker_channels(total: int, desc: str, *, pbar: bool = True):
+    """Open worker logging and optional progress listeners.
 
-    Convenience wrapper for joblib drivers that always use both the log and
-    progress channels with the same lifetime.
+    Args:
+        total: Number of work items for the progress bar.
+        desc: Progress bar label.
+        pbar: Whether to enable progress reporting (default True).
+
+    Yields:
+        WorkerChannel with a log queue and, when enabled, a progress queue.
+        With pbar=False, report() is a no-op and no progress listener is started.
     """
     # progress_queue_listener swaps console handlers via logging_redirect_tqdm;
     # log_queue_listener captures the handler list at construction time, so it
     # must run *inside* the redirect to see the tqdm-aware handlers.
     with (
-        progress_queue_listener(total, desc) as pq,
+        progress_queue_listener(total, desc) if pbar else nullcontext() as pq,
         log_queue_listener() as lq,
     ):
         yield WorkerChannel(log_queue=lq, progress_queue=pq)

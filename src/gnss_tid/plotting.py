@@ -9,6 +9,13 @@ from tqdm import autonotebook
 from .center_finding import find_center, find_center_grid_search, find_center_huber
 
 
+def _get_masked_image(data, density_thresh):
+    """Return data.image, optionally masked where density <= density_thresh."""
+    if density_thresh is not None and "density" in data:
+        return data.image.where(data.density > density_thresh)
+    return data.image
+
+
 def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):
     if np.isnan(wavelength) or np.isnan(offset) or np.any(np.isnan(center)):
         return []
@@ -29,11 +36,14 @@ def plot_circles(center, wavelength, offset, ax=None, data=None, maxr=1200):
     return artists
 
 
-def plot_patches(data, img=True, ax=None, length_fraction=0.3, width=.006):
+def plot_patches(data, img=True, ax=None, length_fraction=0.3, width=.006, density_thresh=None):
     if ax is None:
         ax = plt.gca()
     if img:
-        data.image.plot(ax=ax, vmax=.3)
+        img_da = data.image
+        if density_thresh is not None and "density" in data:
+            img_da = img_da.where(data.density > density_thresh)
+        img_da.plot(ax=ax, vmax=.3)
 
     # Flatten the patch grid via xarray so coords stay aligned with values
     # regardless of (px, py) dim order.
@@ -62,7 +72,7 @@ def plot_patches(data, img=True, ax=None, length_fraction=0.3, width=.006):
         width=width,
     )
 
-def plot_pre_center_finder(data):
+def plot_pre_center_finder(data, density_thresh=None):
     """Diagnostic plot of the raw inputs to ``find_center``.
 
     Image + per-patch wavevector quiver, with **no** center estimates
@@ -70,7 +80,7 @@ def plot_pre_center_finder(data):
     nonsense) to inspect what went into it.
     """
     fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
-    plot_patches(data, ax=ax, img=True)
+    plot_patches(data, ax=ax, img=True, density_thresh=density_thresh)
     return fig, ax
 
 
@@ -98,7 +108,7 @@ def plot_peak_patch_spectrum(data):
     return fig, ax
 
 
-def plot_center_finder(data):
+def plot_center_finder(data, density_thresh=None):
     """Diagnostic plot pooling all time slices for the seed estimators.
 
     LSQ and grid-search objectives are summed over the full ``(time, py, px)``
@@ -128,7 +138,7 @@ def plot_center_finder(data):
     init_slice = data.isel(time=data.objective.argmax())
 
     fig, ax = plt.subplots(1, 2, tight_layout=True, figsize=(12, 5))
-    plot_patches(init_slice, ax=ax[0], img=True)
+    plot_patches(init_slice, ax=ax[0], img=True, density_thresh=density_thresh)
     ax[0].plot(cw[0], cw[1], 'x', label="lsq weighted")
     ax[0].plot(cu[0], cu[1], 'x', label="lsq unweighted")
     ax[0].plot(ch[0], ch[1], 'x', label="huber")
@@ -210,7 +220,7 @@ def plot_center_finder_fit(result_list, s=4, c0=None, cbox=None):
     return fig, ax
 
 
-def make_animation(data, save_fn, limit=-1, writer="pillow", maxr=2400):
+def make_animation(data, save_fn, limit=-1, writer="pillow", maxr=2400, density_thresh=None):
     with plt.style.context("bmh"):
         layout = [
             ["A", "B"],
@@ -238,7 +248,7 @@ def make_animation(data, save_fn, limit=-1, writer="pillow", maxr=2400):
                 ax["B"].axvline(data.time.values[ii], color="k", linestyle='--'),
                 ax["C"].axvline(data.time.values[ii], color="k", linestyle='--'),
                 ax["D"].axvline(data.time.values[ii], color="k", linestyle='--'),
-                data.isel(time=ii).image.drop_vars("time").plot(ax=ax["E"], vmax=.3, add_colorbar=False)
+                _get_masked_image(data.isel(time=ii), density_thresh).drop_vars("time").plot(ax=ax["E"], vmax=.3, add_colorbar=False)
             ]
 
             frame_artists += plot_circles(

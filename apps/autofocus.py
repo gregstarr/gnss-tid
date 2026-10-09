@@ -117,7 +117,7 @@ def main(cfg: DictConfig):
 
         logger.info("saving results to %s", cfg.output_fn)
         result.to_netcdf(cfg.output_fn)
-        make_animation(result, "event.gif")
+        make_animation(result, "event.gif", density_thresh=cfg.focus.density_thresh)
     except Exception:
         logger.error("An error occurred:\n%s", traceback.format_exc())
         raise
