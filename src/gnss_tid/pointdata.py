@@ -13,7 +13,7 @@ from joblib import Parallel, delayed
 from tqdm_joblib import tqdm_joblib
 
 from .coords import Local2D, aer2ipp
-from .utils import normalize_paths
+from .utils import PathInput, normalize_paths
 
 LOGGER = logging.getLogger(__name__)
 OBS_DIM = "obs"
@@ -432,7 +432,7 @@ def _apply_tec_filtering_df(df: pd.DataFrame, q_thresh: float) -> pd.DataFrame:
 
 
 def load_observations(
-    files: Path | list[Path],
+    files: PathInput,
     lat_limits,
     lon_limits,
     time_limits,
@@ -440,7 +440,7 @@ def load_observations(
     q_thresh: float = 0.99,
     n_jobs: int = 16,
     pbar: bool = True,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load GNSS observation data from files.
 
     Args:
@@ -544,7 +544,7 @@ def make_time_windows(
     return windows
 
 
-def lookup_rx_location(obs: pd.DataFrame, rx: pd.DataFrame) -> np.ndarray:
+def lookup_rx_location(obs: pd.DataFrame, rx: pd.DataFrame) -> pd.DataFrame:
     """Get receiver positions for given receiver names.
 
     Args:

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class ImageMakerBase(ABC):
-    def __init__(self, hres, hp_freq=0.05, neighbor_radius=100, **kwargs):
+    def __init__(self, hres, hp_freq=0.05, neighbor_radius=100.0, **kwargs):
         self.kwargs = kwargs
         self.hp_freq = hp_freq
         self.hres = hres

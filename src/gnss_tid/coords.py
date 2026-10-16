@@ -154,14 +154,14 @@ def ecef2spherical(x: np.ndarray, y: np.ndarray, z: np.ndarray):
     return lat, lon, radius
 
 
-def aer2ipp(az, el, rxp, H=350):
+def aer2ipp(az, el, rxp, H=350.0):
     """
     Compute poistion of Ionospheric piercing points (IPPs) at height H [km]
-    for a given mulitdimensional vecotr of azimuth/elevation/rang (aer) and 
+    for a given mulitdimensional vecotr of azimuth/elevation/rang (aer) and
     the receiver position (rxp = [lat, lon, h0]).
-    
-    * Prol, F., et al (2017), COMPARATIVE STUDY OF METHODS FOR CALCULATING 
-    IONOSPHERIC POINTS AND DESCRIBING THE GNSS SIGNAL PATH. 
+
+    * Prol, F., et al (2017), COMPARATIVE STUDY OF METHODS FOR CALCULATING
+    IONOSPHERIC POINTS AND DESCRIBING THE GNSS SIGNAL PATH.
     Doi:10.1590/s1982-21702017000400044
     Web: http://www.scielo.br/scielo.php?script=sci_arttext&pid=S1982-21702017000400669&lng=en&tlng=en
     """
