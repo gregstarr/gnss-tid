@@ -39,6 +39,7 @@ no-op, so the same worker body works in serial callers that pass ``None``.
 """
 
 import logging
+import sys
 import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -102,15 +103,38 @@ def log_queue_listener():
     """Yield a multiprocessing log queue with a running ``QueueListener``.
 
     The listener forwards records to whatever handlers are attached to the
-    root logger and is stopped cleanly on exit.
+    root logger, respecting each handler's own level, and is stopped cleanly
+    on exit.
     """
     q = Manager().Queue()
-    listener = QueueListener(q, *logging.getLogger().handlers)
+    listener = QueueListener(q, *logging.getLogger().handlers, respect_handler_level=True)
     listener.start()
     try:
         yield q
     finally:
         listener.stop()
+
+
+def _console_level() -> int:
+    """Return the level of the root logger's console handler, WARNING if none.
+
+    A console handler is any ``StreamHandler`` writing to stdout or stderr.
+    Used to mirror the replaced console handler's level onto the tqdm
+    stand-in handler installed by ``logging_redirect_tqdm``, which copies
+    formatter, stream and filters of the handler it replaces but not its
+    level.
+
+    Returns:
+        Integer level of the console handler (e.g. ``logging.WARNING``),
+        or ``logging.WARNING`` when no console handler is attached.
+    """
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.StreamHandler) and handler.stream in (
+            sys.stdout,
+            sys.stderr,
+        ):
+            return handler.level
+    return logging.WARNING
 
 
 @contextmanager
@@ -121,9 +145,21 @@ def progress_queue_listener(total: int, desc: str):
     :meth:`WorkerChannel.report`).  A daemon thread on the parent process
     drains the queue and calls ``bar.update(n)`` for each value.  On exit a
     ``None`` sentinel stops the thread and the bar is closed.
+
+    Console records during the bar's lifetime are emitted through the
+    tqdm-aware stand-in handler, which inherits the level of the console
+    handler it replaces so e.g. Hydra's ``console.level: WARNING`` keeps
+    INFO records off the console while the bar is live.
     """
     q = Manager().Queue()
+    level = _console_level()
     with logging_redirect_tqdm():
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and handler.stream in (
+                sys.stdout,
+                sys.stderr,
+            ):
+                handler.setLevel(level)
         bar = tqdm(total=total, desc=desc)
 
         def _drain():
