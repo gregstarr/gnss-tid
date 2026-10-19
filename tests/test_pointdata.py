@@ -61,6 +61,34 @@ def test_load_observations_legacy_fixture_maps_res_to_dtec1():
     assert obs["dtec0"].isna().all()
 
 
+def test_load_observations_stec_max_filters_receivers():
+    unfiltered, _ = load_observations(
+        V2_FILES,
+        [0.0, 90.0],
+        [-180.0, 180.0],
+        ["20150324_000000", "20150327_000000"],
+        n_jobs=1,
+        pbar=False,
+    )
+    med_stec = unfiltered["stec"].abs().groupby(unfiltered["rx"]).median()
+    threshold = float(med_stec.median())
+
+    filtered, _ = load_observations(
+        V2_FILES,
+        [0.0, 90.0],
+        [-180.0, 180.0],
+        ["20150324_000000", "20150327_000000"],
+        stec_max=threshold,
+        n_jobs=1,
+        pbar=False,
+    )
+
+    good = med_stec[med_stec <= threshold].index
+    bad = med_stec[med_stec > threshold].index
+    assert set(filtered["rx"].unique()) == set(good)
+    assert len(unfiltered) - len(filtered) == unfiltered["rx"].isin(bad).sum()
+
+
 def test_make_time_windows_can_keep_or_drop_incomplete_windows():
     times = np.array(
         [
@@ -290,9 +318,7 @@ def test_get_data_with_proj_adds_local_cs():
     )
     windows = make_time_windows(obs, 4, 2)
     proj = Local2D.from_geodetic(45.0, 0.0, 350.0)
-    out = get_data(
-        obs, rx, windows[0], 350, [0.0, 90.0], [-180.0, 180.0], proj=proj
-    )
+    out = get_data(obs, rx, windows[0], 350, [0.0, 90.0], [-180.0, 180.0], proj=proj)
 
     assert out is not None
     assert "x" in out.columns

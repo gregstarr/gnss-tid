@@ -431,6 +431,25 @@ def _apply_tec_filtering_df(df: pd.DataFrame, q_thresh: float) -> pd.DataFrame:
     return filtered
 
 
+def _filter_receivers_by_stec(obs: pd.DataFrame, stec_max: float | None) -> pd.DataFrame:
+    """Drop receivers whose median absolute STEC exceeds ``stec_max``.
+
+    Args:
+        obs: DataFrame with ``rx`` and ``stec`` columns.
+        stec_max: Maximum allowed median absolute STEC (file units);
+            ``None`` disables the filter.
+
+    Returns:
+        DataFrame containing only rows from receivers whose median
+        absolute STEC is <= ``stec_max``.
+    """
+    if stec_max is None or "stec" not in obs.columns:
+        return obs
+    med_stec = obs["stec"].abs().groupby(obs["rx"]).median()
+    good = med_stec <= stec_max
+    return obs[obs["rx"].map(good)]
+
+
 def load_observations(
     files: PathInput,
     lat_limits,
@@ -438,6 +457,7 @@ def load_observations(
     time_limits,
     el_min: float = 0,
     q_thresh: float = 0.99,
+    stec_max: float | None = None,
     n_jobs: int = 16,
     pbar: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -450,6 +470,9 @@ def load_observations(
         time_limits: [start, end] time bounds
         el_min: Minimum elevation angle filter
         q_thresh: Quantile threshold for TEC filtering (default 0.99)
+        stec_max: Maximum allowed median absolute STEC per receiver (file
+            units); receivers above it are dropped. ``None`` disables the
+            filter (default None)
         noise_max: Maximum noise threshold (unused, retained for API compatibility)
         n_jobs: Number of parallel jobs for loading (default 16)
         pbar: Whether to show progress bar (default True)
@@ -496,6 +519,18 @@ def load_observations(
 
     rx = _concat_lookups(lookups)
     rx = pd.DataFrame(rx)
+
+    n_rx_before = obs["rx"].nunique()
+    obs = _filter_receivers_by_stec(obs, stec_max)
+    n_rx_after = obs["rx"].nunique()
+    if n_rx_after < n_rx_before:
+        LOGGER.info(
+            "stec_max filter dropped %d of %d receivers (median |STEC| > %s)",
+            n_rx_before - n_rx_after,
+            n_rx_before,
+            stec_max,
+        )
+
     obs = _apply_tec_filtering_df(obs, q_thresh)
 
     return obs, rx
