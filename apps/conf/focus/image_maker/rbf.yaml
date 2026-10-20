@@ -1,7 +1,7 @@
 _target_: gnss_tid.image.ScipyRbfImageMaker
 hres: 20
-hp_freq: .02
-neighbor_radius: 100.0
+hp_freq: .01
+neighbor_radius: 60.0
 neighbors: 50
 kernel: multiquadric
 smoothing: .3

@@ -327,16 +327,20 @@ def make_animation(
 ):
     """Build a GIF/MP4 animation of the focusing sequence.
 
-    Four line panels (focus height, wavelength, objective, DC offset) with a
-    vertical cursor at the current time, plus a lower image panel showing the
-    masked TEC image, fitted ring circles, and a red ring marking the
+    Three rows: two line panels (focus height and objective) with a vertical
+    cursor at the current time, a per-patch peak power map (``F`` over the
+    patch-centre coordinates ``px``/``py``, shared color scale across frames),
+    and a lower map panel showing the masked TEC image, fitted ring circles
+    (only when center finding ran), and a red ring marking the
     highest-objective FFT patch at each time step.
 
     Args:
-        data: Result dataset with dims ``(time,)`` for ``height``,
-            ``wavelength``, ``objective``, ``offset``; ``(time, x, y)`` for
-            ``image`` / ``density``; ``(time, px, py)`` for ``F`` (patch peak
-            powers); and ``(ci,)`` for ``center``.
+        data: Result dataset with dims ``(time,)`` for ``height`` and
+            ``objective``; ``(time, x, y)`` for ``image`` / ``density``;
+            ``(time, px, py)`` for ``F`` (patch peak powers); and optionally
+            ``(time,)`` for ``wavelength``/``offset`` and ``(ci,)`` for
+            ``center`` — the ring circles are drawn only when those three
+            variables are present.
         save_fn: Output file path (e.g. ``"event.gif"``).
         limit: Number of frames to render; ``-1`` renders every time step.
         writer: Matplotlib animation writer name.
@@ -349,49 +353,53 @@ def make_animation(
     """
     with plt.style.context("bmh"):
         layout = [
-            ["A", "B"],
-            ["C", "D"],
-            ["E", "E"],
+            ["height", "objective"],
+            ["power", "power"],
+            ["map", "map"],
         ]
         fig, ax = plt.subplot_mosaic(
             layout,
             figsize=(10, 10),
-            height_ratios=[10, 10, 22],
+            height_ratios=[5, 10, 10],
             tight_layout=True,
         )
+
+        f_vmax = float(data.F.max())
+        if not np.isfinite(f_vmax):
+            f_vmax = None
 
         animation_artists = []
         if limit <= 0:
             limit = data.time.shape[0]
         for ii in autonotebook.tqdm(range(limit), "creating frames"):
             frame_artists = []
-            frame_artists += data.height.plot(ax=ax["A"], c="blue")
-            frame_artists += data.wavelength.plot(ax=ax["B"], c="blue")
-            frame_artists += data.objective.plot(ax=ax["C"], c="blue")
-            frame_artists += data.offset.plot(ax=ax["D"], c="blue")
+            frame_artists += data.height.plot(ax=ax["height"], c="blue")
+            frame_artists += data.objective.plot(ax=ax["objective"], c="blue")
             frame_artists += [
-                ax["A"].axvline(data.time.values[ii], color="k", linestyle="--"),
-                ax["B"].axvline(data.time.values[ii], color="k", linestyle="--"),
-                ax["C"].axvline(data.time.values[ii], color="k", linestyle="--"),
-                ax["D"].axvline(data.time.values[ii], color="k", linestyle="--"),
+                ax["height"].axvline(data.time.values[ii], color="k", linestyle="--"),
+                ax["objective"].axvline(data.time.values[ii], color="k", linestyle="--"),
+                data.F.isel(time=ii).plot(
+                    ax=ax["power"], vmax=f_vmax, add_colorbar=False
+                ),
                 _get_masked_image(data.isel(time=ii), density_thresh)
                 .drop_vars("time")
-                .plot(ax=ax["E"], vmax=0.3, add_colorbar=False),
+                .plot(ax=ax["map"], vmax=0.3, add_colorbar=False),
             ]
 
-            frame_artists += plot_circles(
-                data.center,
-                data.wavelength.isel(time=ii),
-                data.offset.isel(time=ii),
-                ax=ax["E"],
-                maxr=maxr,
-            )
+            if "center" in data and "wavelength" in data and "offset" in data:
+                frame_artists += plot_circles(
+                    data.center,
+                    data.wavelength.isel(time=ii),
+                    data.offset.isel(time=ii),
+                    ax=ax["map"],
+                    maxr=maxr,
+                )
 
-            frame_artists += _mark_max_patch(ax["E"], data.isel(time=ii))
+            frame_artists += _mark_max_patch(ax["map"], data.isel(time=ii))
 
             animation_artists.append(frame_artists)
 
-        ani = animation.ArtistAnimation(fig=fig, artists=animation_artists, interval=200)
+        ani = animation.ArtistAnimation(fig=fig, artists=animation_artists, interval=300)
         with autonotebook.tqdm(
             total=len(animation_artists), desc="Saving video"
         ) as progress_bar:

@@ -454,9 +454,21 @@ def _plot_objective_surface(
     height_track: xarray.DataArray,
     path: str,
 ) -> None:
-    """Save a height-objective heatmap with the selected height overlaid."""
+    """Save a height-objective heatmap with the selected height overlaid.
+
+    A sequential colormap is always used; the log-track surface spans
+    negative values, for which xarray's default would pick a divergent map.
+
+    Args:
+        surface: Objective surface with dims ``(time, height)`` holding the
+            per-height objective values to render as a heatmap.
+        height_track: Selected-height track with dim ``(time,)``, a ``height``
+            coordinate for the selected height and a ``time`` coordinate;
+            plotted over the heatmap.
+        path: Destination image path.
+    """
     fig, ax = plt.subplots(figsize=(5, 6), tight_layout=True)
-    surface.plot(ax=ax)
+    surface.plot(ax=ax, cmap="viridis")
     ax.plot(height_track, height_track.time, "r.-")
     fig.savefig(path)
     plt.close(fig)
@@ -673,11 +685,11 @@ def run_spectral_focusing(
     cfg: SpectralConfig,
     window_size: int,
     step: int,
-    center_finder: Callable,
     heights: np.ndarray,
     n_jobs: int,
     time_window: int = 1,
     density_thresh: int = 20,
+    center_finder: Callable | None = None,
 ) -> xarray.Dataset:
     """Unified spectral focusing pipeline.
 
@@ -705,10 +717,14 @@ def run_spectral_focusing(
        patches at the selected focus height, plus an image-only
        reconstruction at the alternative track's heights.
 
-    Both modes finish with a global center-finding step that fits source
-    parameters jointly across all times on the ``logscale_objective``-selected
-    sequence.  The center-finding initialization window is the time with the
-    highest raw linear objective.
+    Both modes optionally finish with a global center-finding step that fits
+    source parameters jointly across all times on the
+    ``logscale_objective``-selected sequence; the center-finding
+    initialization window is the time with the highest raw linear objective.
+    The step runs only when ``center_finder`` is provided; when
+    ``center_finder=None`` center finding is skipped (logged at INFO level)
+    and the returned dataset has no ``center``, ``wavelength``, ``offset`` or
+    ``phase`` variables.
 
     Args:
         cfg: Shared spectral configuration (observations, receiver table,
@@ -716,8 +732,6 @@ def run_spectral_focusing(
             TEC variable name).  See :class:`SpectralConfig` for fields.
         window_size: Number of unique time steps per sliding window.
         step: Stride (in time steps) between consecutive windows.
-        center_finder: Callable ``(c0, w0, x, y, image) -> dict`` used for
-            global source-parameter estimation.
         heights: Array of IPP heights (km) to search.
         n_jobs: Number of parallel worker processes.
         time_window: Rolling-mean window length (in time steps) applied to the
@@ -726,6 +740,9 @@ def run_spectral_focusing(
         density_thresh: Minimum image density (data points per pixel) required
             for a pixel to be included in the sparse image used for center
             finding.  Default ``20``.
+        center_finder: Callable ``(c0, w0, x, y, image) -> dict`` used for
+            global source-parameter estimation.  ``None`` skips center
+            finding entirely.  Default ``None``.
 
     Returns:
         An ``xarray.Dataset`` with dimensions ``(time,)`` and variables:
@@ -748,10 +765,14 @@ def run_spectral_focusing(
           ``logscale_objective`` (two-pass mode only; the suffix names that
           track's smoothing, and the chosen track is stored as
           ``image``/``density``).
-        - ``center`` ``(ci,)``: estimated source center ``[x, y]`` (km, global).
-        - ``wavelength`` ``(time,)``: estimated horizontal wavelength (km).
-        - ``offset`` ``(time,)``: estimated DC offset.
-        - ``phase`` ``(time,)``: estimated wave phase (rad).
+        - ``center`` ``(ci,)``: estimated source center ``[x, y]`` (km, global;
+          only present when center finding runs).
+        - ``wavelength`` ``(time,)``: estimated horizontal wavelength (km; only
+          present when center finding runs).
+        - ``offset`` ``(time,)``: estimated DC offset (only present when center
+          finding runs).
+        - ``phase`` ``(time,)``: estimated wave phase (rad; only present when
+          center finding runs).
 
         Attributes include ``coord_center`` as ``(mean_lat, mean_lon)``.
     """
@@ -783,8 +804,6 @@ def run_spectral_focusing(
     fig.savefig("plots/objective_lines_linear.png")
     plt.close(fig)
 
-    sparse_img = _build_sparse_image(data_focused, density_thresh)
-
     init_slice = data_focused.isel(time=data_focused.objective.argmax())
 
     # Persist diagnostic inputs before plotting so they survive plot failures.
@@ -814,33 +833,40 @@ def run_spectral_focusing(
     fig.savefig("plots/center_init.png")
     plt.close(fig)
 
-    t_center_start = perf_counter()
-    params = run_smoothed_center_finder(
-        px=data_focused.px.values,
-        py=data_focused.py.values,
-        F=data_focused.F.values,
-        Fx=data_focused.Fx.values,
-        Fy=data_focused.Fy.values,
-        sparse_x=sparse_img.x.values,
-        sparse_y=sparse_img.y.values,
-        sparse_image=sparse_img.image.values.T,
-        image_x=data_focused.x.values,
-        image_y=data_focused.y.values,
-        center_finder=center_finder,
-    )
-    logger.info(
-        "center finding done in %.1f s (%d iterations)",
-        perf_counter() - t_center_start,
-        len(params["history"]["metric"]),
-    )
-    logger.info("total time: %.1f s", perf_counter() - t_total_start)
-
     coord_center = (np.mean(cfg.lat_limits), np.mean(cfg.lon_limits))
-    return data_focused.assign(
-        center=("ci", params["center"]),
-        wavelength=xarray.DataArray(
-            params["wavelength"], coords={"time": sparse_img.time}
-        ),
-        offset=xarray.DataArray(params["offset"], coords={"time": sparse_img.time}),
-        phase=xarray.DataArray(params["phase"], coords={"time": sparse_img.time}),
-    ).assign_attrs(coord_center=coord_center)
+    if center_finder is None:
+        logger.info("center_finder not configured; skipping center finding")
+        result = data_focused
+    else:
+        sparse_img = _build_sparse_image(data_focused, density_thresh)
+
+        t_center_start = perf_counter()
+        params = run_smoothed_center_finder(
+            px=data_focused.px.values,
+            py=data_focused.py.values,
+            F=data_focused.F.values,
+            Fx=data_focused.Fx.values,
+            Fy=data_focused.Fy.values,
+            sparse_x=sparse_img.x.values,
+            sparse_y=sparse_img.y.values,
+            sparse_image=sparse_img.image.values.T,
+            image_x=data_focused.x.values,
+            image_y=data_focused.y.values,
+            center_finder=center_finder,
+        )
+        logger.info(
+            "center finding done in %.1f s (%d iterations)",
+            perf_counter() - t_center_start,
+            len(params["history"]["metric"]),
+        )
+        result = data_focused.assign(
+            center=("ci", params["center"]),
+            wavelength=xarray.DataArray(
+                params["wavelength"], coords={"time": sparse_img.time}
+            ),
+            offset=xarray.DataArray(params["offset"], coords={"time": sparse_img.time}),
+            phase=xarray.DataArray(params["phase"], coords={"time": sparse_img.time}),
+        )
+
+    logger.info("total time: %.1f s", perf_counter() - t_total_start)
+    return result.assign_attrs(coord_center=coord_center)

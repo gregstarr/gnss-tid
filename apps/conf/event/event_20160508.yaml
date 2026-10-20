@@ -8,7 +8,7 @@ longitude_limits:
   - -70.0
 time_limits:
   - "20160508_000000"
-  - "20160508_090000"
+  - "20160508_100000"
 el_min: 30
 q_thresh: 0.99
 stec_max: null

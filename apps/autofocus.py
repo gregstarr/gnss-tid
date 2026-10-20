@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
     """Build inputs for :func:`~gnss_tid.spectral.run_spectral_focusing`.
 
+    The ``focus.center_finder`` config group is optional: when it is null or
+    absent, no center finder is instantiated and ``center_finder=None`` is
+    passed through ``orchestration_kwargs``; the pipeline then skips center
+    finding (logged at INFO level) and the result has no ``center``,
+    ``wavelength``, ``offset`` or ``phase`` variables.
+
     Args:
         obs: Observation DataFrame returned by load_observations.
         rx: Receiver lookup DataFrame returned by load_observations.
@@ -39,7 +45,12 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
     )
 
     image_maker = hydra.utils.instantiate(cfg.focus.image_maker)
-    center_finder = hydra.utils.instantiate(cfg.focus.center_finder)
+    center_finder_cfg = cfg.focus.get("center_finder")
+    center_finder = (
+        hydra.utils.instantiate(center_finder_cfg)
+        if center_finder_cfg is not None
+        else None
+    )
 
     proj = Local2D.from_geodetic(
         float(np.mean(lat_limits)),
@@ -85,6 +96,11 @@ def main(cfg: DictConfig):
     former ``block_spectral`` pipeline); ``time_window>1`` applies a rolling
     mean over the objective surface (equivalent to the former
     ``smoothed_patch`` pipeline).
+
+    The ``focus.center_finder`` config group is optional: when it is null or
+    absent the pipeline skips center finding (logged at INFO level) and the
+    result has no ``center``, ``wavelength``, ``offset`` or ``phase``
+    variables.
 
     Args:
         cfg: Hydra DictConfig composed from ``config.yaml`` and its defaults.
