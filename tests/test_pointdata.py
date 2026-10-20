@@ -61,6 +61,37 @@ def test_load_observations_legacy_fixture_maps_res_to_dtec1():
     assert obs["dtec0"].isna().all()
 
 
+def test_load_observations_mixed_v1_v2_files():
+    obs, rx = load_observations(
+        [DATA_DIR / "legacy.h5", V2_FILES[0]],
+        [0.0, 90.0],
+        [-180.0, 180.0],
+        ["20150324_000000", "20150327_000000"],
+        n_jobs=1,
+        pbar=False,
+    )
+
+    assert rx["rx"].is_unique
+    assert rx["lat"].notna().all()
+    assert set(obs["rx"].unique()).issubset(set(rx["rx"]))
+    assert obs["dtec1"].notna().any()
+
+
+def test_load_observations_dedupes_receivers_from_repeated_files():
+    obs, rx = load_observations(
+        [*V2_FILES, V2_FILES[0]],
+        [0.0, 90.0],
+        [-180.0, 180.0],
+        ["20150324_000000", "20150327_000000"],
+        n_jobs=1,
+        pbar=False,
+    )
+
+    assert rx["rx"].is_unique
+    assert rx["lat"].notna().all()
+    assert set(obs["rx"].unique()).issubset(set(rx["rx"]))
+
+
 def test_load_observations_stec_max_filters_receivers():
     unfiltered, _ = load_observations(
         V2_FILES,
@@ -149,6 +180,24 @@ def test_get_data_aggregates_and_projects_v2_fixture():
     assert "sv" in out.columns
 
 
+def test_get_data_with_receiver_in_multiple_files():
+    obs, rx = load_observations(
+        [*V2_FILES, V2_FILES[0]],
+        [0.0, 90.0],
+        [-180.0, 180.0],
+        ["20150324_000000", "20150327_000000"],
+        n_jobs=1,
+        pbar=False,
+    )
+    full_range = (np.datetime64("2015-03-24"), np.datetime64("2015-03-27"))
+
+    out = get_data(obs, rx, full_range, 350, [0.0, 90.0], [-180.0, 180.0])
+
+    assert out is not None
+    assert len(out) > 0
+    assert not out.duplicated(subset=["rx", "sv"]).any()
+
+
 def test_lookup_rx_location_returns_merged_positions():
     obs, rx = load_observations(
         V2_FILES,
@@ -164,6 +213,22 @@ def test_lookup_rx_location_returns_merged_positions():
     assert "lat" in result.columns
     assert "lon" in result.columns
     assert "alt" in result.columns
+    assert len(result) == len(obs)
+
+
+def test_lookup_rx_location_collapses_duplicate_rx_entries():
+    obs, rx = load_observations(
+        V2_FILES,
+        [0.0, 90.0],
+        [-180.0, 180.0],
+        ["20150324_000000", "20150327_000000"],
+        n_jobs=1,
+        pbar=False,
+    )
+    duplicated_rx = pd.concat([rx, rx], ignore_index=True)
+
+    result = lookup_rx_location(obs, duplicated_rx)
+
     assert len(result) == len(obs)
 
 

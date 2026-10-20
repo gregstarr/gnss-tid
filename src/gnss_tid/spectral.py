@@ -18,6 +18,7 @@ from .parallel_logging import WorkerChannel, worker_channels
 from .plotting import (
     plot_center_finder,
     plot_density_map,
+    plot_objective_lines,
     plot_peak_patch_spectrum,
     plot_pre_center_finder,
 )
@@ -40,12 +41,15 @@ class SpectralConfig:
     joblib pickling explicit.  Fields are immutable so the same instance can
     be safely shared across processes.
 
-    ``logscale_objective`` controls the two-pass time-smoothing reduction: when
-    ``True``, the rolling mean is taken over ``log10(objective)`` (geometric
-    mean of the per-time objectives); when ``False``, arithmetic mean of the
-    raw linear-power objective.  It has no effect on stored patch powers,
-    which are always linear, and no effect on the single-pass branch (where
-    ``argmax`` over height is invariant to monotone transforms).
+    ``logscale_objective`` selects the two-pass smoothing reduction used for
+    the main sequence: when ``True``, heights come from a rolling mean over
+    ``log10(objective)`` (geometric mean); when ``False``, from an arithmetic
+    mean of the raw linear-power objective.  Both reductions are always
+    computed and both height tracks' image sequences are saved; this flag
+    decides which sequence carries the FFT patches and is used for center
+    finding.  It has no effect on stored patch powers, which are always
+    linear, and no effect on the single-pass branch (where ``argmax`` over
+    height is invariant to monotone transforms).
     """
 
     obs: pd.DataFrame
@@ -144,9 +148,19 @@ def build_patch_stack(
     ch = ch or WorkerChannel()
     patches = []
     for height in heights:
-        ch.info("[%s - %s]: height = %.1f", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time), height)
+        ch.info(
+            "[%s - %s]: height = %.1f",
+            _fmt_dt(ts.start_time),
+            _fmt_dt(ts.end_time),
+            height,
+        )
         data = get_data(
-            cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
+            cfg.obs,
+            cfg.rx,
+            ts,
+            height,
+            cfg.lat_limits,
+            cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
@@ -192,9 +206,19 @@ def build_image_patch_stack(
     patches = []
     npts = []
     for height in heights:
-        ch.info("[%s - %s]: height = %.1f", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time), height)
+        ch.info(
+            "[%s - %s]: height = %.1f",
+            _fmt_dt(ts.start_time),
+            _fmt_dt(ts.end_time),
+            height,
+        )
         data = get_data(
-            cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
+            cfg.obs,
+            cfg.rx,
+            ts,
+            height,
+            cfg.lat_limits,
+            cfg.lon_limits,
             proj=cfg.proj,
         )
         if data is None:
@@ -240,8 +264,10 @@ def compute_height_objectives_for_slice(
         A ``DataArray`` of objective values with dims ``(time, height)``,
         or ``None`` if data retrieval failed for any height.
     """
-    with (ch or WorkerChannel()) as ch:
-        ch.info("[%s - %s]: processing heights", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time))
+    with ch or WorkerChannel() as ch:
+        ch.info(
+            "[%s - %s]: processing heights", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time)
+        )
         patches = build_patch_stack(ts, heights, cfg, ch=ch)
         if patches is None:
             return None
@@ -281,8 +307,10 @@ def _select_best_height_for_slice(
 
         Returns ``None`` if data retrieval failed for any height.
     """
-    with (ch or WorkerChannel()) as ch:
-        ch.info("[%s - %s]: single-pass slice", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time))
+    with ch or WorkerChannel() as ch:
+        ch.info(
+            "[%s - %s]: single-pass slice", _fmt_dt(ts.start_time), _fmt_dt(ts.end_time)
+        )
         data_all = build_image_patch_stack(ts, heights, cfg, ch=ch)
         if data_all is None:
             return None
@@ -306,8 +334,63 @@ def _rebuild_slice_at_height(
     height: float,
     cfg: SpectralConfig,
     ch: WorkerChannel | None = None,
+    with_patch: bool = True,
 ) -> xarray.Dataset | None:
-    """Second-pass worker: rebuild image and patch at a fixed focus height.
+    """Second-pass worker: rebuild the image (and optionally patch) at a fixed focus height.
+
+    Args:
+        ts: Time window for this slice.
+        time: Start timestamp; used as the ``time`` coordinate.
+        height: IPP height (km) at which to evaluate this time slice.
+        cfg: Shared spectral configuration.
+        ch: Optional worker channel carrying the log and progress queues;
+            one progress tick is emitted at the end of the slice.
+        with_patch: Whether to compute the FFT patch; the image-only alt-track
+            pass sets this to ``False`` to skip the patch computation.
+
+    Returns:
+        A ``Dataset`` with variables ``image`` and ``density`` (plus ``patch``
+        when ``with_patch``), expanded along ``time``, or ``None`` if data
+        retrieval failed.
+    """
+    with ch or WorkerChannel() as ch:
+        ch.info("focused slice time=%s height=%.1f", _fmt_dt(time), height)
+        data = get_data(
+            cfg.obs,
+            cfg.rx,
+            ts,
+            height,
+            cfg.lat_limits,
+            cfg.lon_limits,
+            proj=cfg.proj,
+        )
+        if data is None:
+            return None
+        img = generate_image(data, cfg.image_maker, cfg.tec_name)
+        if with_patch:
+            p = compute_patch_spectra(
+                img.image,
+                cfg.block_size,
+                cfg.block_step,
+                cfg.window,
+            )
+            img = img.assign(patch=p)
+        ch.report()
+        return img.expand_dims(time=[time])
+
+
+def _build_image_at_height(
+    ts: TimeWindow,
+    time: np.datetime64,
+    height: float,
+    cfg: SpectralConfig,
+    ch: WorkerChannel | None = None,
+) -> xarray.Dataset | None:
+    """Second-pass worker: rebuild the image at a fixed focus height.
+
+    Image-only variant of :func:`_rebuild_slice_at_height`, for the
+    alternative height track whose image sequence is saved for comparison
+    only.
 
     Args:
         ts: Time window for this slice.
@@ -318,26 +401,52 @@ def _rebuild_slice_at_height(
             one progress tick is emitted at the end of the slice.
 
     Returns:
-        A ``Dataset`` with variables ``image``, ``density``, and ``patch``,
-        expanded along ``time``, or ``None`` if data retrieval failed.
+        A ``Dataset`` with variables ``image`` and ``density``, expanded
+        along ``time``, or ``None`` if data retrieval failed.
     """
-    with (ch or WorkerChannel()) as ch:
-        ch.info("focused slice time=%s height=%.1f", _fmt_dt(time), height)
-        data = get_data(
-            cfg.obs, cfg.rx, ts, height, cfg.lat_limits, cfg.lon_limits,
-            proj=cfg.proj,
-        )
-        if data is None:
-            return None
-        img = generate_image(data, cfg.image_maker, cfg.tec_name)
-        p = compute_patch_spectra(
-            img.image,
-            cfg.block_size,
-            cfg.block_step,
-            cfg.window,
-        )
-        ch.report()
-        return img.assign(patch=p).expand_dims(time=[time])
+    return _rebuild_slice_at_height(ts, time, height, cfg, ch, with_patch=False)
+
+
+def _valid_height_inputs(
+    track: xarray.DataArray,
+    time_windows: list,
+    times: list,
+) -> list:
+    """Build ``(window, start-time, height)`` triples for valid windows.
+
+    Args:
+        track: Height track ``(time,)`` with a ``height`` coordinate; windows
+            whose track height is NaN (failed first pass) are skipped.
+        time_windows: Time windows aligned with ``times``.
+        times: Window start timestamps, matching the track's labels.
+
+    Returns:
+        A list of ``(ts, time, height)`` triples for the windows with a
+        finite track height.
+    """
+    return [
+        (ts, time, track.isel(time=ii).height.item())
+        for ii, (ts, time) in enumerate(zip(time_windows, times, strict=True))
+        if not track.isel(time=ii).height.isnull().item()
+    ]
+
+
+def _select_focus_height(smoothed: xarray.DataArray) -> xarray.DataArray:
+    """Pick the highest-objective height per time from a smoothed surface.
+
+    Args:
+        smoothed: Smoothed objective surface with dims ``(time, height)``;
+            all-NaN time rows (failed windows) are preserved.
+
+    Returns:
+        A ``(time,)`` DataArray of the maximum smoothed objective along
+        ``height``, with a ``height`` coordinate recording the selected
+        height; dropped time rows are reindexed back as NaN.
+    """
+    smooth_nonull = smoothed.dropna(dim="time")
+    return smooth_nonull.isel(height=smooth_nonull.argmax(dim="height")).reindex(
+        time=smoothed.time
+    )
 
 
 def _plot_objective_surface(
@@ -384,9 +493,7 @@ def _focus_per_slice(
     corresponding image plus patch summary; no further ``extract_patch_peaks``
     call is needed downstream.
     """
-    logger.info(
-        "run_spectral_focusing: single pass (no smoothing), n_jobs=%d", n_jobs
-    )
+    logger.info("run_spectral_focusing: single pass (no smoothing), n_jobs=%d", n_jobs)
     total = len(time_windows) * len(heights)
     with (
         worker_channels(total, desc="focus (single pass)") as ch,
@@ -417,11 +524,17 @@ def _focus_with_time_smoothing(
     n_jobs: int,
     time_window: int,
 ) -> xarray.Dataset:
-    """Run the two-pass focusing branch: objectives → smoothing → reconstruction."""
+    """Run the two-pass focusing branch: objectives → smoothing → reconstruction.
+
+    Both smoothing reductions are computed: an arithmetic mean on the linear
+    objective surface and a geometric mean (mean of log10 power).  Each
+    reduction selects its own height track; ``cfg.logscale_objective`` picks
+    the track whose sequence carries the FFT patches and is used for center
+    finding, while both tracks' objectives and image sequences are kept in
+    the result.
+    """
     # First pass — objectives only (images discarded to save memory)
-    logger.info(
-        "run_spectral_focusing: first pass (objectives), n_jobs=%d", n_jobs
-    )
+    logger.info("run_spectral_focusing: first pass (objectives), n_jobs=%d", n_jobs)
     total_pass1 = len(time_windows) * len(heights)
     t_pass1_start = perf_counter()
     with (
@@ -429,9 +542,7 @@ def _focus_with_time_smoothing(
         Parallel(n_jobs=n_jobs) as parallel,
     ):
         objectives = parallel(
-            delayed(compute_height_objectives_for_slice)(
-                ts, time, heights, cfg, ch
-            )
+            delayed(compute_height_objectives_for_slice)(ts, time, heights, cfg, ch)
             for ts, time in zip(time_windows, times, strict=True)
         )
     logger.info("pass 1 done in %.1f s", perf_counter() - t_pass1_start)
@@ -441,27 +552,30 @@ def _focus_with_time_smoothing(
     ).reindex(time=times)
 
     # Height smoothing — arithmetic mean on the objective surface (linear
-    # power) or geometric mean (mean of log10 power) when logscale_objective
-    # is set.  Geometric mean down-weights occasional huge peaks in favour of
-    # heights with consistently moderate objectives.
-    obj_for_smoothing = np.log10(obj_data) if cfg.logscale_objective else obj_data
-    smoothed = obj_for_smoothing.rolling(
-        time=time_window, center=True, min_periods=1
-    ).mean()
+    # power) and geometric mean (mean of log10 power).  The geometric mean
+    # down-weights occasional huge peaks in favour of heights with
+    # consistently moderate objectives; logscale_objective decides which
+    # track's sequence is used for center finding.
+    rolling = {"time": time_window, "center": True, "min_periods": 1}
+    smoothed_linear = obj_data.rolling(**rolling).mean()
+    smoothed_log = np.log10(obj_data).rolling(**rolling).mean()
 
-    smooth_nonull = smoothed.dropna(dim="time")
-    focus_height = smooth_nonull.isel(
-        height=smooth_nonull.argmax(dim="height")
-    ).reindex(time=smoothed.time)
+    focus_linear = _select_focus_height(smoothed_linear)
+    focus_log = _select_focus_height(smoothed_log)
 
-    _plot_objective_surface(smoothed, focus_height.height, "plots/objective.png")
+    focus_height = focus_log if cfg.logscale_objective else focus_linear
+    focus_alt = focus_linear if cfg.logscale_objective else focus_log
+    alt_suffix = "linear" if cfg.logscale_objective else "log"
 
-    # Second pass — reconstruct images at the smoothed focus heights
-    second_pass_inputs = [
-        (ts, time, focus_height.isel(time=ii).height.item())
-        for ii, (ts, time) in enumerate(zip(time_windows, times, strict=True))
-        if not focus_height.isel(time=ii).height.isnull().item()
-    ]
+    _plot_objective_surface(
+        smoothed_log if cfg.logscale_objective else smoothed_linear,
+        focus_height.height,
+        "plots/objective.png",
+    )
+
+    # Second pass — reconstruct images and FFT patches at the selected focus
+    # heights, then an image-only pass at the alternative track's heights
+    second_pass_inputs = _valid_height_inputs(focus_height, time_windows, times)
     if not second_pass_inputs:
         raise RuntimeError("no valid focus heights after first pass; cannot continue")
 
@@ -487,11 +601,71 @@ def _focus_with_time_smoothing(
     if not valid_slices:
         raise RuntimeError("second pass produced no valid slices")
 
+    # Alt-track sequence: windows where both tracks selected the same height
+    # and the main rebuild succeeded already have an identical image, so only
+    # the remaining heights are rebuilt image-only.
     data_focused = xarray.concat(valid_slices, "time")
+    main_height_by_time = {time: h for _, time, h in second_pass_inputs}
+    rebuilt_labels = set(data_focused.time.values)
+    alt_inputs = _valid_height_inputs(focus_alt, time_windows, times)
+    reused_times = [
+        time
+        for _, time, h in alt_inputs
+        if time in rebuilt_labels and main_height_by_time[time] == h
+    ]
+    alt_rebuild = [
+        (ts, time, h)
+        for ts, time, h in alt_inputs
+        if time not in rebuilt_labels or main_height_by_time[time] != h
+    ]
+    data_alt = None
+    if alt_rebuild:
+        logger.info(
+            "run_spectral_focusing: alt pass (%d / %d windows)",
+            len(alt_rebuild),
+            len(time_windows),
+        )
+        t_alt_start = perf_counter()
+        with (
+            worker_channels(len(alt_rebuild), desc="focus alt pass (images)") as ch,
+            Parallel(n_jobs=n_jobs) as parallel,
+        ):
+            alt_slices = parallel(
+                delayed(_build_image_at_height)(ts, time, height, cfg, ch)
+                for ts, time, height in alt_rebuild
+            )
+        logger.info("alt pass done in %.1f s", perf_counter() - t_alt_start)
+        valid_alt = [s for s in alt_slices if s is not None]
+        if valid_alt:
+            data_alt = xarray.concat(valid_alt, "time").reindex(time=focus_alt.time)
+        else:
+            logger.warning("run_spectral_focusing: alt pass produced no valid slices")
+
+    extras = {
+        "objective_smoothed_linear": focus_linear.reset_coords(drop=True),
+        "objective_smoothed_log": focus_log.reset_coords(drop=True),
+        "height_linear": focus_linear.height.reset_coords(drop=True),
+        "height_log": focus_log.height.reset_coords(drop=True),
+    }
+    if alt_inputs:
+        alt_image = data_alt.image if data_alt is not None else None
+        alt_density = data_alt.density if data_alt is not None else None
+        if reused_times:
+            reused = data_focused[["image", "density"]].sel(time=reused_times)
+            if alt_image is None:
+                alt_image = reused.image
+                alt_density = reused.density
+            else:
+                alt_image = alt_image.combine_first(reused.image)
+                alt_density = alt_density.combine_first(reused.density)
+        if alt_image is not None:
+            extras[f"image_{alt_suffix}"] = alt_image.reindex(time=focus_alt.time)
+            extras[f"density_{alt_suffix}"] = alt_density.reindex(time=focus_alt.time)
     return (
         data_focused.merge(extract_patch_peaks(data_focused.patch))
         .reindex(time=focus_height.time)
         .assign(height=focus_height.height)
+        .assign(**extras)
     )
 
 
@@ -523,13 +697,18 @@ def run_spectral_focusing(
     1. **Init**: same as above.
     2. **First pass**: for each time window compute only the per-height FFT
        objectives (images are discarded to save memory).
-    3. **Height smoothing**: apply a rolling geometric mean over time to the
-       full objective surface before selecting heights.
+    3. **Height smoothing**: apply both rolling reductions over time to the
+       objective surface — an arithmetic mean of the linear objective and a
+       geometric mean of log10 — selecting one height track per reduction.
+       ``logscale_objective`` picks the track used for the main sequence.
     4. **Second pass**: for each time window reconstruct the image and FFT
-       patches at the smoothed focus height.
+       patches at the selected focus height, plus an image-only
+       reconstruction at the alternative track's heights.
 
     Both modes finish with a global center-finding step that fits source
-    parameters jointly across all times.
+    parameters jointly across all times on the ``logscale_objective``-selected
+    sequence.  The center-finding initialization window is the time with the
+    highest raw linear objective.
 
     Args:
         cfg: Shared spectral configuration (observations, receiver table,
@@ -551,11 +730,24 @@ def run_spectral_focusing(
     Returns:
         An ``xarray.Dataset`` with dimensions ``(time,)`` and variables:
 
-        - ``image`` ``(time, x, y)``: gridded TEC image at the focus height.
+        - ``image`` ``(time, x, y)``: gridded TEC image at the focus height
+          selected by the ``logscale_objective`` smoothing (two-pass mode).
         - ``patch`` ``(time, px, py, kx, ky)``: FFT patch at the spectral peak.
         - ``F``, ``Fx``, ``Fy`` ``(time, px, py)``: peak power and wavenumbers.
-        - ``objective`` ``(time,)``: summed peak power used for height selection.
-        - ``height`` ``(time,)``: focus height (km).
+        - ``objective`` ``(time,)``: summed peak power at the selected heights
+          (linear power; argmax over this picks the initialization window).
+        - ``height`` ``(time,)``: focus height (km) of the main sequence.
+        - ``objective_smoothed_linear``, ``objective_smoothed_log`` ``(time,)``:
+          both smoothed objectives at their respective selected heights
+          (two-pass mode only; linear power for the arithmetic-mean track,
+          log10 units for the geometric-mean track).
+        - ``height_linear``, ``height_log`` ``(time,)``: height tracks selected
+          by each smoothing (two-pass mode only).
+        - ``image_linear``/``image_log``, ``density_linear``/``density_log``
+          ``(time, x, y)``: image sequence at the height track not chosen by
+          ``logscale_objective`` (two-pass mode only; the suffix names that
+          track's smoothing, and the chosen track is stored as
+          ``image``/``density``).
         - ``center`` ``(ci,)``: estimated source center ``[x, y]`` (km, global).
         - ``wavelength`` ``(time,)``: estimated horizontal wavelength (km).
         - ``offset`` ``(time,)``: estimated DC offset.
@@ -576,14 +768,20 @@ def run_spectral_focusing(
     t_total_start = perf_counter()
     if time_window == 1:
         t_pass_start = perf_counter()
-        data_focused = _focus_per_slice(
-            time_windows, times, heights, cfg, n_jobs
-        )
+        data_focused = _focus_per_slice(time_windows, times, heights, cfg, n_jobs)
         logger.info("single pass done in %.1f s", perf_counter() - t_pass_start)
     else:
         data_focused = _focus_with_time_smoothing(
             time_windows, times, heights, cfg, n_jobs, time_window
         )
+
+    fig, _ = plot_objective_lines(data_focused, logscale=cfg.logscale_objective)
+    fig.savefig("plots/objective_lines.png")
+    plt.close(fig)
+
+    fig, _ = plot_objective_lines(data_focused, logscale=False)
+    fig.savefig("plots/objective_lines_linear.png")
+    plt.close(fig)
 
     sparse_img = _build_sparse_image(data_focused, density_thresh)
 
@@ -646,5 +844,3 @@ def run_spectral_focusing(
         offset=xarray.DataArray(params["offset"], coords={"time": sparse_img.time}),
         phase=xarray.DataArray(params["phase"], coords={"time": sparse_img.time}),
     ).assign_attrs(coord_center=coord_center)
-
-

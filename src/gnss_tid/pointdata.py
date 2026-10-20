@@ -385,11 +385,19 @@ def _concat_obs_arrays(results: list[dict[str, np.ndarray]]) -> dict[str, np.nda
 def _concat_lookups(lookups: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     """Concatenate receiver lookup dictionaries from all files.
 
+    Each lookup's ``rx`` and geodetic values are flattened to 1-D arrays of
+    equal length before concatenating, so files that hold a single scalar
+    receiver position (one receiver per file) and files that hold one position
+    per receiver concatenate identically, including in mixed loads. The result
+    keeps one entry per file-receiver pair; callers collapse receivers that
+    appear in multiple files.
+
     Args:
-        lookups: List of lookup dictionaries from each file
+        lookups: List of lookup dictionaries from each file, each with ``rx``
+            and ``lat``/``lon``/``alt`` entries
 
     Returns:
-        Combined lookup dictionary
+        Combined lookup dictionary with aligned 1-D arrays
     """
     if not lookups:
         return {
@@ -399,13 +407,9 @@ def _concat_lookups(lookups: list[dict[str, np.ndarray]]) -> dict[str, np.ndarra
             LOOKUP_GEO[2]: np.array([]),
         }
 
-    result = {"rx": np.concatenate([lk["rx"] for lk in lookups])}
-    if np.isscalar(lookups[0][LOOKUP_GEO[0]]):
-        for g in LOOKUP_GEO:
-            result[g] = np.array([lk[g] for lk in lookups])
-    else:
-        for g in LOOKUP_GEO:
-            result[g] = np.concatenate([lk[g] for lk in lookups])
+    result = {"rx": np.concatenate([_as_array(lk["rx"]) for lk in lookups])}
+    for g in LOOKUP_GEO:
+        result[g] = np.concatenate([_as_array(lk[g]).astype(float) for lk in lookups])
     return result
 
 
@@ -473,13 +477,14 @@ def load_observations(
         stec_max: Maximum allowed median absolute STEC per receiver (file
             units); receivers above it are dropped. ``None`` disables the
             filter (default None)
-        noise_max: Maximum noise threshold (unused, retained for API compatibility)
         n_jobs: Number of parallel jobs for loading (default 16)
         pbar: Whether to show progress bar (default True)
 
     Returns:
         Tuple of (combined pandas DataFrame with observation data,
-                 lookup dict with rx_name and rx_position arrays)
+                  pandas DataFrame receiver lookup with one row per unique
+                  receiver name and its lat/lon/alt position; a receiver found
+                  in several files is collapsed to its first entry)
 
     Raises:
         ValueError: If no observation files provided or no valid data loaded
@@ -519,6 +524,16 @@ def load_observations(
 
     rx = _concat_lookups(lookups)
     rx = pd.DataFrame(rx)
+    n_lookup_entries = len(rx)
+    rx = rx.drop_duplicates(subset="rx", keep="first").reset_index(drop=True)
+    if len(rx) < n_lookup_entries:
+        LOGGER.info(
+            "collapsed %d of %d receiver lookup entries to %d unique receivers "
+            "(receiver present in multiple files)",
+            n_lookup_entries - len(rx),
+            n_lookup_entries,
+            len(rx),
+        )
 
     n_rx_before = obs["rx"].nunique()
     obs = _filter_receivers_by_stec(obs, stec_max)
@@ -580,16 +595,21 @@ def make_time_windows(
 
 
 def lookup_rx_location(obs: pd.DataFrame, rx: pd.DataFrame) -> pd.DataFrame:
-    """Get receiver positions for given receiver names.
+    """Attach receiver geodetic positions to observation rows.
 
     Args:
-        obs: DataFrame with rx column
-        rx: Array of receiver names
+        obs: DataFrame with a ``rx`` column of receiver names
+        rx: Receiver lookup DataFrame with ``rx`` and ``lat``/``lon``/``alt``
+            columns. Duplicate ``rx`` entries (a receiver loaded from several
+            files) are collapsed to the first entry so the merge cannot fan
+            out rows.
 
     Returns:
-        Array of receiver positions (lat, lon, alt)
+        DataFrame with one row per ``obs`` row and columns ``rx``, ``lat``,
+        ``lon``, ``alt``
     """
-    result = pd.merge(obs, rx, on="rx", how="left")
+    unique_rx = rx.drop_duplicates(subset="rx", keep="first")
+    result = pd.merge(obs, unique_rx, on="rx", how="left")
     return result.loc[:, ["rx", *LOOKUP_GEO]]
 
 

@@ -51,7 +51,7 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         obs=obs,
         rx=rx,
         image_maker=image_maker,
-        tec_name=cfg.focus.tec_name,
+        tec_name=cfg.event.tec_name,
         block_size=block_size,
         block_step=cfg.focus.block_step,
         window=window,
@@ -101,6 +101,7 @@ def main(cfg: DictConfig):
             time_limits=list(cfg.event.time_limits),
             el_min=cfg.event.el_min,
             q_thresh=cfg.event.q_thresh,
+            stec_max=cfg.event.stec_max,
             n_jobs=cfg.event.n_jobs,
         )
         logger.info("loaded %d observations from %d receivers", len(obs), len(rx))

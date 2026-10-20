@@ -1,5 +1,6 @@
 files:
   - /disk1/tid/2021/0101/*.nc
+  - /disk1/tid/2021/0102/*.nc
 latitude_limits:
   - 24.0
   - 51.0
@@ -7,8 +8,10 @@ longitude_limits:
   - -126.0
   - -70.0
 time_limits:
-  - "20210101_180000"
-  - "20210102_120000"
+  - "20210101_140000"
+  - "20210102_040000"
 el_min: 30
 q_thresh: 0.99
-n_jobs: 16
+stec_max: null
+n_jobs: 12
+tec_name: dtec3

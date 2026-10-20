@@ -7,8 +7,10 @@ longitude_limits:
   - -126.0
   - -70.0
 time_limits:
-  - "20170820_110000"
-  - "20170820_170000"
+  - "20170820_040000"
+  - "20170820_140000"
 el_min: 30
 q_thresh: 0.99
-n_jobs: 16
+stec_max: 30
+n_jobs: 12
+tec_name: dtec1

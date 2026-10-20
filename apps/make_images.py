@@ -80,6 +80,7 @@ def main(cfg: DictConfig):
             time_limits=list(cfg.event.time_limits),
             el_min=cfg.event.el_min,
             q_thresh=cfg.event.q_thresh,
+            stec_max=cfg.event.stec_max,
             n_jobs=cfg.event.n_jobs,
         )
         logger.info("loaded %d observations from %d receivers", len(obs), len(rx))
@@ -116,7 +117,7 @@ def main(cfg: DictConfig):
             image_maker=image_maker,
             time_windows=time_windows,
             heights=heights,
-            tec_name=cfg.tec_name,
+            tec_name=cfg.event.tec_name,
             lat_limits=lat_limits,
             lon_limits=lon_limits,
             proj=proj,

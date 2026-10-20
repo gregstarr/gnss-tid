@@ -9,4 +9,6 @@ longitude_limits:
 time_limits: ???
 el_min: 30
 q_thresh: 0.99
+stec_max: 30
 n_jobs: 16
+tec_name: dtec1
