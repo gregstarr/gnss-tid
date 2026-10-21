@@ -111,9 +111,9 @@ def estimate_parameters_block_debug(
 
     k = params.kx + params.ky * 1j
     k2 = k**2
-    params["phase_velocity"] = (
-        params["weight"] * k * params["freq"] / abs(k) ** 2
-    ).sum(KDIMS)
+    params["phase_velocity"] = (params["weight"] * k * params["freq"] / abs(k) ** 2).sum(
+        KDIMS
+    )
     params["phase_velocity_angle"] = xr.ufuncs.angle(params["phase_velocity"])
     params["phase_speed"] = abs(params["phase_velocity"]) * 1000  # m/s
     print("phase velocity")
@@ -185,9 +185,9 @@ def estimate_parameters_block_debug(
 
         power_plot = hv.Image(txy["power"]).opts(cmap=cc.cm.gouldian, colorbar=True)
         levels = txy["power"].quantile([0.8, 0.95], KDIMS).values
-        power_plot = hv.operation.contours(
-            power_plot, levels=levels, overlaid=True
-        ).opts(show_legend=False) * hv.Points(
+        power_plot = hv.operation.contours(power_plot, levels=levels, overlaid=True).opts(
+            show_legend=False
+        ) * hv.Points(
             (params.kx.values[kx], params.ky.values[ky]), kdims=["kx", "ky"]
         ).opts(color="r")
 
@@ -209,13 +209,9 @@ def estimate_parameters_block_debug(
             * hv.Curve(pxy["patch_freq_snr"])
             * hv.VLine(params.time.values[time])
         )
-        coherence_plot = hv.Curve(pxy["coherence"]) * hv.VLine(
-            params.time.values[time]
-        )
+        coherence_plot = hv.Curve(pxy["coherence"]) * hv.VLine(params.time.values[time])
 
-        tec_plot.opts(
-            width=2 * L, height=L - 100, title="TEC + Phase Velocity [time]"
-        )
+        tec_plot.opts(width=2 * L, height=L - 100, title="TEC + Phase Velocity [time]")
 
         layout = pn.GridSpec()
         layout[0, 0] = coherence_plot.opts(title="Coherence [x, y]")
@@ -234,12 +230,8 @@ def estimate_parameters_block_debug(
     time_slider = pn.widgets.IntSlider(
         start=0, end=img.time.shape[0] - 1, step=1, name="time"
     )
-    x_slider = pn.widgets.IntSlider(
-        start=0, end=params.px.shape[0] - 1, step=1, name="x"
-    )
-    y_slider = pn.widgets.IntSlider(
-        start=0, end=params.py.shape[0] - 1, step=1, name="y"
-    )
+    x_slider = pn.widgets.IntSlider(start=0, end=params.px.shape[0] - 1, step=1, name="x")
+    y_slider = pn.widgets.IntSlider(start=0, end=params.py.shape[0] - 1, step=1, name="y")
     kx_slider = pn.widgets.IntSlider(
         start=0, end=params.kx.shape[0] - 1, step=1, name="kx"
     )

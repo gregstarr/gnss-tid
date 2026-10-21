@@ -23,6 +23,10 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
     finding (logged at INFO level) and the result has no ``center``,
     ``wavelength``, ``offset`` or ``phase`` variables.
 
+    The ``density_thresh`` and ``min_patch_coverage`` focus-config keys drive
+    the patch density gate and are passed into the ``SpectralConfig`` (they
+    are per-worker static inputs, not run-level orchestration knobs).
+
     Args:
         obs: Observation DataFrame returned by load_observations.
         rx: Receiver lookup DataFrame returned by load_observations.
@@ -58,6 +62,8 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         float(np.median(heights)),
     )
 
+    # Pass the density-gate keys through unconverted: ``density_thresh: null``
+    # maps to the documented ``None`` (no cut, no gate) dataclass default.
     spectral_cfg = SpectralConfig(
         obs=obs,
         rx=rx,
@@ -70,6 +76,8 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         lat_limits=lat_limits,
         lon_limits=lon_limits,
         proj=proj,
+        density_thresh=cfg.focus.density_thresh,
+        min_patch_coverage=cfg.focus.min_patch_coverage,
     )
     orchestration_kwargs = {
         "window_size": cfg.sample.window,
@@ -78,7 +86,6 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         "heights": heights,
         "n_jobs": cfg.focus.n_jobs,
         "time_window": cfg.focus.time_window,
-        "density_thresh": cfg.focus.density_thresh,
     }
     return spectral_cfg, orchestration_kwargs
 

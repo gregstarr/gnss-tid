@@ -64,9 +64,7 @@ def calculate_gps_position(t: datetime, ephem: dict[str, Any]) -> np.ndarray:
 
     # Corrected longitude of ascending node (GPS ICD eq. includes Earth-rotation at toe)
     omega_k = (
-        ephem["Omega0"]
-        + (ephem["OmegaDot"] - OMEGA_E) * tk
-        - OMEGA_E * ephem["toe_gps"]
+        ephem["Omega0"] + (ephem["OmegaDot"] - OMEGA_E) * tk - OMEGA_E * ephem["toe_gps"]
     )
 
     x_ecef = xk_prime * np.cos(omega_k) - yk_prime * np.cos(ik) * np.sin(omega_k)
@@ -752,12 +750,14 @@ class SimulationScenario:
             self.receivers[:, 0], self.receivers[:, 1], self.receivers[:, 2]
         )
 
-        df = pd.DataFrame({
-            "rx": [f"rx{i}" for i in range(len(self.receivers))],
-            "lat": lats,
-            "lon": lons,
-            "alt": radii - 6378.137,
-        })
+        df = pd.DataFrame(
+            {
+                "rx": [f"rx{i}" for i in range(len(self.receivers))],
+                "lat": lats,
+                "lon": lons,
+                "alt": radii - 6378.137,
+            }
+        )
         return df
 
     def generate_observation_table(self, time=None):

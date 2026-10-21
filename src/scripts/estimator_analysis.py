@@ -1,19 +1,17 @@
 import itertools
-import time
 import pathlib
 import shutil
 
-from matplotlib.ticker import LogLocator, LogFormatter, NullFormatter
-from scipy.optimize import least_squares
+import dask
+import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 import tqdm
-import numpy as np
-import dask
-from dask.distributed import Client
 import xarray
+from dask.distributed import Client
+from matplotlib.ticker import LogFormatter, LogLocator, NullFormatter
+from scipy.optimize import least_squares
 from xarray.groupers import BinGrouper, UniqueGrouper
-import matplotlib.pyplot as plt
-
 
 ERR_VARS = {"period_error": "tau", "wavelength_error": "lam", "speed_error": "spd"}
 DIST_VARS = ["r", "w", "logw"]
@@ -47,26 +45,30 @@ def get_results(fn, center=None):
     results = xarray.open_zarr(fn)
     results = results.assign_coords(spd=results.lam * 1000 / (results.tau * 60))
     if center is not None:
-        results = results.assign_coords(r=xarray.ufuncs.hypot(results.px-center[0], results.py-center[1]))
+        results = results.assign_coords(
+            r=xarray.ufuncs.hypot(results.px - center[0], results.py - center[1])
+        )
         results = results.assign_coords(w=results.r / results.lam)
         results = results.assign_coords(logw=xarray.ufuncs.log10(results.w))
     if "phase_speed" not in results:
         results["phase_speed"] = abs(results.phase_velocity)
     results = results.assign(
-        period_error=results.period-results.tau,
-        wavelength_error=results.wavelength-results.lam,
-        speed_error=results.phase_speed-results.spd,
+        period_error=results.period - results.tau,
+        wavelength_error=results.wavelength - results.lam,
+        speed_error=results.phase_speed - results.spd,
     )
     return results.sortby("snr")
 
 
-def run_snr_range_task(results, groupers, varname, group_var, err_type, norm_type, facet=None, logscale=False):
+def run_snr_range_task(
+    results, groupers, varname, group_var, err_type, norm_type, facet=None, logscale=False
+):
     name = f"{varname}_{norm_type}_{err_type}__by__{group_var}"
     if facet:
         name = name + f"_and_{facet}"
     if logscale:
         name = "log_" + name
-    
+
     data = results[varname]
     if norm_type == "rel":
         data = data / results[ERR_VARS[varname]]
@@ -74,14 +76,14 @@ def run_snr_range_task(results, groupers, varname, group_var, err_type, norm_typ
         data = abs(data)
     if logscale:
         data = xarray.ufuncs.log10(data)
-    
+
     groups = {
         "snr": groupers["snr"],
         group_var: groupers[group_var],
     }
     if facet is not None:
         groups[facet] = groupers[facet]
-    
+
     kwargs = {
         "fn": f"plots/{varname}_{err_type}/{name}.png",
         "center": 0 if err_type == "bias" else False,
@@ -90,7 +92,7 @@ def run_snr_range_task(results, groupers, varname, group_var, err_type, norm_typ
     if facet:
         kwargs["col"] = facet
         kwargs["col_wrap"] = 3
-    
+
     plot_snr_range_error(data, groups, **kwargs)
 
 
@@ -98,7 +100,7 @@ def make_line_plots(results, varname, norm_type, logscale=False):
     name = f"{varname}_{norm_type}__by__snr__line"
     if logscale:
         name = "log_" + name
-    
+
     data = results[varname]
     if norm_type == "rel":
         data = data / results[ERR_VARS[varname]]
@@ -106,7 +108,9 @@ def make_line_plots(results, varname, norm_type, logscale=False):
     df = data.to_dataframe(name=varname)
     fig, ax = plt.subplots()
     sns.lineplot(
-        data=df, x="snr", y=varname,
+        data=df,
+        x="snr",
+        y=varname,
         errorbar="pi",
         estimator="median",
         ax=ax,
@@ -131,18 +135,34 @@ def plot_coupling(results):
     ds = ds[m]
     dp = dp[m]
     dw = dw[m]
-    m = (dw < np.quantile(dw, .999)) & (dp < np.quantile(dp, .999))
+    m = (dw < np.quantile(dw, 0.999)) & (dp < np.quantile(dp, 0.999))
 
     pe = abs(period_error).to_dataframe(name="period_error")
-    fg = sns.relplot(pe, x="snr", y="period_error", hue="tau", kind="line", estimator="median", errorbar=None)
-    fg.set(ylim=[.009, .6])
+    fg = sns.relplot(
+        pe,
+        x="snr",
+        y="period_error",
+        hue="tau",
+        kind="line",
+        estimator="median",
+        errorbar=None,
+    )
+    fg.set(ylim=[0.009, 0.6])
     fg.set(yscale="log")
     set_log_ticks_y(fg.ax)
     plt.savefig("plots/period.png")
     plt.close()
 
     we = abs(wavelength_error).to_dataframe(name="wavelength_error")
-    fg = sns.relplot(we, x="snr", y="wavelength_error", hue="lam", kind="line", estimator="median", errorbar=None)
+    fg = sns.relplot(
+        we,
+        x="snr",
+        y="wavelength_error",
+        hue="lam",
+        kind="line",
+        estimator="median",
+        errorbar=None,
+    )
     # fg.set(ylim=[.009, .6])
     fg.set(yscale="log")
     set_log_ticks_y(fg.ax)
@@ -150,19 +170,19 @@ def plot_coupling(results):
     plt.close()
 
     def model(p, dp):
-        return p[0]*dp / (1 + dp * p[1])
+        return p[0] * dp / (1 + dp * p[1])
 
     def residuals(p, dp, ds):
         return ds - model(p, dp)
 
     init = [-1, 1]
-    fit  = least_squares(residuals, init, args=(dp, ds), loss='soft_l1')
+    fit = least_squares(residuals, init, args=(dp, ds), loss="soft_l1")
     print(fit)
 
     fig, ax = plt.subplots()
-    ax.plot(dp, ds, 'k.', alpha=.1, ms=5)
-    x = np.arange(-1/fit.x[1], 4, .1) + .01
-    sns.kdeplot(x=dp[m], y=ds[m], levels=[.05, .2, .5], linewidths=2)
+    ax.plot(dp, ds, "k.", alpha=0.1, ms=5)
+    x = np.arange(-1 / fit.x[1], 4, 0.1) + 0.01
+    sns.kdeplot(x=dp[m], y=ds[m], levels=[0.05, 0.2, 0.5], linewidths=2)
     ax.plot(x, model(fit.x, x), label=f"y=${fit.x[0]:.2f}x/(1+{fit.x[1]:.2f}x)$")
     ax.legend()
     ax.set_xlim(-1, 4)
@@ -171,8 +191,8 @@ def plot_coupling(results):
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot(dw, dp, 'k.', alpha=.1, ms=4)
-    sns.kdeplot(x=dw[m], y=dp[m], levels=[.05, .2, .5], linewidths=2)
+    ax.plot(dw, dp, "k.", alpha=0.1, ms=4)
+    sns.kdeplot(x=dw[m], y=dp[m], levels=[0.05, 0.2, 0.5], linewidths=2)
     ax.set_xlabel("wavelength relative error")
     ax.set_ylabel("period relative error")
     ax.set_xlim(-1, 3)
@@ -181,8 +201,8 @@ def plot_coupling(results):
     plt.close()
 
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot(dw, dp, 'k.', alpha=.1, ms=4)
-    sns.kdeplot(x=dw[m], y=dp[m], levels=[.05, .2, .5], linewidths=2)
+    ax.plot(dw, dp, "k.", alpha=0.1, ms=4)
+    sns.kdeplot(x=dw[m], y=dp[m], levels=[0.05, 0.2, 0.5], linewidths=2)
     ax.set_xlabel("wavelength relative error")
     ax.set_ylabel("period relative error")
     ax.set_xlim(-1, 3)
@@ -216,8 +236,7 @@ def set_log_ticks_y(ax, base=10, label_minor_if_no_major=True, numticks=15):
             ax.yaxis.set_minor_formatter(LogFormatter(base=base, labelOnlyBase=False))
 
     # Ensure ticks are visible
-    ax.grid(which='minor', axis='y', linestyle='--', linewidth=0.5)
-
+    ax.grid(which="minor", axis="y", linestyle="--", linewidth=0.5)
 
 
 def make_dirs():
@@ -238,14 +257,16 @@ def main():
     RESULTS_FILE = "/disk1/tid/users/starr/results/results3.zarr"
     sns.set_theme("notebook", "whitegrid")
     sns.color_palette("crest", as_cmap=True)
-    
+
     make_dirs()
-    
-    dask.config.set({
-        "distributed.worker.memory.spill": 0.85,  # default: 0.7
-        "distributed.worker.memory.target": 0.75,  # default: 0.6
-        "distributed.worker.memory.terminate": 0.98,  # default: 0.95
-    })
+
+    dask.config.set(
+        {
+            "distributed.worker.memory.spill": 0.85,  # default: 0.7
+            "distributed.worker.memory.target": 0.75,  # default: 0.6
+            "distributed.worker.memory.terminate": 0.98,  # default: 0.95
+        }
+    )
     with Client(processes=True, n_workers=8, threads_per_worker=1) as client:
         print(client.dashboard_link)
         results = get_results(RESULTS_FILE).compute()
@@ -253,9 +274,9 @@ def main():
         groupers = get_groupers(results)
 
         r = results.median(["time"])
-        
+
         plot_coupling(r)
-    
+
         args = list(itertools.product(ERR_VARS, NORM_TYPES))
         for a in tqdm.tqdm(args, "line plots"):
             make_line_plots(r, *a, logscale=True)
@@ -268,17 +289,21 @@ def main():
         args = list(itertools.product(ERR_VARS, DIST_VARS, ["mae"], NORM_TYPES))
         for a in tqdm.tqdm(args, "log basic plots"):
             run_snr_range_task(results, groupers, *a, logscale=True)
-        
+
         # FACET PLOTS
         facet_vars = ["lam", "tau"]
-        args = list(itertools.product(ERR_VARS, DIST_VARS, ERROR_TYPES, NORM_TYPES, facet_vars))
+        args = list(
+            itertools.product(ERR_VARS, DIST_VARS, ERROR_TYPES, NORM_TYPES, facet_vars)
+        )
         for a in tqdm.tqdm(args, "facet plots"):
             run_snr_range_task(results, groupers, *a)
-        
-        args = list(itertools.product(ERR_VARS, DIST_VARS, ["mae"], NORM_TYPES, facet_vars))
+
+        args = list(
+            itertools.product(ERR_VARS, DIST_VARS, ["mae"], NORM_TYPES, facet_vars)
+        )
         for a in tqdm.tqdm(args, "log facet plots"):
             run_snr_range_task(results, groupers, *a, logscale=True)
-    
+
     print("CLUSTER CLOSED")
 
     make_archive()

@@ -10,6 +10,25 @@ from gnss_tid import image, parallel_logging
 from gnss_tid.pointdata import TimeWindow
 
 
+def test_get_data_density_excludes_points_at_radius():
+    """Verify density uses a strict radius without a dense distance matrix.
+
+    Returns:
+        None; asserts a point exactly at the threshold is excluded.
+    """
+    maker = image.MetpyImageMaker(hres=1.0)
+    maker.points = np.zeros((49, 2))
+    maker.shape = (7, 7)
+    maker.xp = np.arange(7)
+    maker.yp = np.arange(7)
+
+    density = maker.get_data_density(
+        x=np.array([0.0, 1.0]), y=np.array([0.0, 0.0]), threshold=1.0
+    )
+
+    assert density.sel(x=3, y=3).item() == 1.0
+
+
 @pytest.fixture
 def cube_inputs(monkeypatch):
     """Return cube arguments and mocked retrieval for a small spatial grid.

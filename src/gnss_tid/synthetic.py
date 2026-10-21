@@ -1,4 +1,3 @@
-
 import dask.array as da
 import numpy as np
 import pandas
@@ -7,17 +6,17 @@ from numpy.typing import ArrayLike
 
 
 def spherical_model(
-        time: pandas.DatetimeIndex | None = None,
-        center: ArrayLike = (100, 100),
-        snr_lim = [-6, 6],
-        lam_lim = [150, 400],
-        tau_lim = [10, 50],
-        n_trials = 10,
-        xlim: ArrayLike = (-1000, 1000),
-        ylim: ArrayLike = (-1000, 1000),
-        hres: float = 20,
-        batch_size: int = 20,
-    ) -> xr.DataArray:
+    time: pandas.DatetimeIndex | None = None,
+    center: ArrayLike = (100, 100),
+    snr_lim=[-6, 6],
+    lam_lim=[150, 400],
+    tau_lim=[10, 50],
+    n_trials=10,
+    xlim: ArrayLike = (-1000, 1000),
+    ylim: ArrayLike = (-1000, 1000),
+    hres: float = 20,
+    batch_size: int = 20,
+) -> xr.DataArray:
     if time is None:
         time = pandas.date_range("2025-01-01", "2025-01-01T01:00:00", freq="60s")
 
@@ -64,11 +63,14 @@ def spherical_model(
     cycle = (r - (phase_speed / 1000) * t) / lam
     tec = da.cos(2 * np.pi * cycle)
     noise_factor = da.sqrt((10 ** (snr / (-10))) / 2)
-    noise = xr.DataArray(
-        da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
-        dims=tec.dims,
-        coords=tec.coords,
-    ) * noise_factor
+    noise = (
+        xr.DataArray(
+            da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
+            dims=tec.dims,
+            coords=tec.coords,
+        )
+        * noise_factor
+    )
     noisy_tec = tec + noise
     density = xr.ones_like(noisy_tec, chunks=noisy_tec.chunks) * 20
 
@@ -76,8 +78,7 @@ def spherical_model(
     # friendlier (decomposable reduction, much more fuseable in dask). rechunk after the
     # rolling op because otherwise xarray or dask changes the chunk layout
     noisy_tec = (
-        noisy_tec
-        .rolling(x=3, y=3, center=True, min_periods=1)
+        noisy_tec.rolling(x=3, y=3, center=True, min_periods=1)
         .mean()
         .chunk(x=-1, y=-1, time=-1, trial=batch_size)
     )
@@ -91,16 +92,16 @@ def spherical_model(
 
 
 def planar_model(
-        time: pandas.DatetimeIndex | None = None,
-        snr_lim = [-6, 6],
-        lam_lim = [150, 400],
-        tau_lim = [10, 50],
-        n_trials = 10,
-        xlim: ArrayLike = (-1000, 1000),
-        ylim: ArrayLike = (-1000, 1000),
-        hres: float = 20,
-        batch_size: int = 20,
-    ) -> xr.DataArray:
+    time: pandas.DatetimeIndex | None = None,
+    snr_lim=[-6, 6],
+    lam_lim=[150, 400],
+    tau_lim=[10, 50],
+    n_trials=10,
+    xlim: ArrayLike = (-1000, 1000),
+    ylim: ArrayLike = (-1000, 1000),
+    hres: float = 20,
+    batch_size: int = 20,
+) -> xr.DataArray:
     if time is None:
         time = pandas.date_range("2025-01-01", "2025-01-01T01:00:00", freq="60s")
 
@@ -140,23 +141,24 @@ def planar_model(
     arg = (k.conj() * r).real - w * t
     tec = da.cos(arg)
     noise_factor = da.sqrt((10 ** (snr / (-10))) / 2)
-    noise = xr.DataArray(
-        da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
-        dims=tec.dims,
-        coords=tec.coords,
-    ) * noise_factor
+    noise = (
+        xr.DataArray(
+            da.random.normal(size=tec.shape, chunks=tec.data.chunksize),
+            dims=tec.dims,
+            coords=tec.coords,
+        )
+        * noise_factor
+    )
     noisy_tec = tec + noise
     density = xr.ones_like(noisy_tec, chunks=noisy_tec.chunks) * 20
 
     noisy_tec = (
-        noisy_tec
-        .rolling(x=3, y=3, center=True, min_periods=1)
+        noisy_tec.rolling(x=3, y=3, center=True, min_periods=1)
         .mean()
         .chunk(x=-1, y=-1, time=-1, trial=batch_size)
     )
-    data = (
-        xr.Dataset({"image": noisy_tec, "density": density})
-        .assign_coords(snr=snr, lam=lam, tau=tau, dir=direction)
+    data = xr.Dataset({"image": noisy_tec, "density": density}).assign_coords(
+        snr=snr, lam=lam, tau=tau, dir=direction
     )
 
     return data

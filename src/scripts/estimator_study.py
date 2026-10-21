@@ -1,4 +1,5 @@
 import os
+
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -6,13 +7,12 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import dask
 import dask.array as da
-from dask.diagnostics import ProgressBar
 import xarray
-import numpy as np
-from zarr.codecs import BloscCodec, BloscCname, BloscShuffle
+from dask.diagnostics import ProgressBar
+from zarr.codecs import BloscCname, BloscCodec, BloscShuffle
 
-import gnss_tid.synthetic
 import gnss_tid.parameter
+import gnss_tid.synthetic
 
 
 def save_data(data_fn):
@@ -29,7 +29,7 @@ def save_data(data_fn):
         ylim=(-1500, 1500),
         hres=20,
     )
-    
+
     compressor = BloscCodec(cname=BloscCname.lz4, clevel=5, shuffle=BloscShuffle.shuffle)
     encoding = {var: {"compressors": compressor} for var in data.data_vars}
     with ProgressBar():
@@ -49,13 +49,12 @@ def get_template(data, nfft, block_size, step_size):
 
 if __name__ == "__main__":
     dask.config.set(scheduler="threads", num_workers=6)
-    
+
     data_fn = "/disk1/tid/users/starr/results/data3.zarr"
     output_fn = "results3.zarr"
     # save_data(data_fn)
     data = xarray.open_zarr(
-        data_fn,
-        chunks=dict(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
+        data_fn, chunks=dict(px=-1, py=-1, lam=1, tau=1, time=-1, snr=1)
     )
     print(data)
     print()
@@ -63,11 +62,11 @@ if __name__ == "__main__":
     print("PARAMETERS")
     print("#" * 80)
     print()
-    
+
     BLOCK_SIZE = 32
     STEP_SIZE = 8
     NFFT = 128
-    
+
     template = get_template(data, NFFT, BLOCK_SIZE, STEP_SIZE)
 
     params = data.map_blocks(

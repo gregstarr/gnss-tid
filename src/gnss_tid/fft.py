@@ -14,9 +14,7 @@ from scipy.fft import fft2, fftfreq, fftshift
 from scipy.signal.windows import kaiser
 
 
-def make_kaiser_2d(
-    block_size: int, beta: float, *, normalize: bool = True
-) -> np.ndarray:
+def make_kaiser_2d(block_size: int, beta: float, *, normalize: bool = True) -> np.ndarray:
     """Return the 2-D outer-product Kaiser window.
 
     When ``normalize=True`` the window is divided by its sum, so that an FFT of
@@ -39,9 +37,7 @@ def make_kaiser_2d(
     return w
 
 
-def make_patches(
-    img: xr.DataArray, block_size: int, step_size: int
-) -> xr.DataArray:
+def make_patches(img: xr.DataArray, block_size: int, step_size: int) -> xr.DataArray:
     """Build rolling FFT patches from a 2-D image.
 
     Returns a DataArray with patch-centre dims ``(py, px)`` and per-patch
@@ -131,6 +127,7 @@ def fft_patches(
             (DC at the centre).
     """
     if isinstance(patches, xr.DataArray):
+
         def _fft(x: np.ndarray) -> np.ndarray:
             F = fft2(x * window, s=(Nfft, Nfft))
             if shift:

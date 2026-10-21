@@ -7,8 +7,8 @@ import xarray
 from joblib import Parallel, delayed
 from metpy import interpolate as mtpi
 from scipy.interpolate import RBFInterpolator
+from scipy.spatial import cKDTree
 from skimage import filters
-from sklearn.metrics import pairwise_distances
 
 from .coords import Local2D
 from .parallel_logging import WorkerChannel, worker_channels
@@ -109,10 +109,27 @@ class ImageMakerBase(ABC):
     def get_data_density(
         self, x: np.ndarray, y: np.ndarray, threshold: float
     ) -> xarray.DataArray:
-        pd = pairwise_distances(self.points, np.column_stack((x, y)))
-        n = np.sum(pd < threshold, axis=1)
+        """Count nearby observations for every image-grid point.
+
+        Args:
+            x: One-dimensional projected x coordinates of observations, in the
+                same units and frame as ``self.points``.
+            y: One-dimensional projected y coordinates of observations, paired
+                with ``x`` and in the same frame.
+            threshold: Strict neighbor radius in projected-coordinate units.
+
+        Returns:
+            DataArray with dimensions ``(y, x)`` and the image grid's spatial
+            coordinates. Each value is the rolling-mean count of observations
+            strictly closer than ``threshold`` to the corresponding grid point.
+        """
+        tree = cKDTree(np.column_stack((x, y)))
+        # query_ball_point includes points at r; move r down one float to retain <.
+        radius = np.nextafter(threshold, -np.inf)
+        n = tree.query_ball_point(self.points, radius, return_length=True)
         w = n.reshape(self.shape)
-        return xarray.DataArray(w, coords=[self.yp, self.xp], dims=["y", "x"])
+        density = xarray.DataArray(w, coords=[self.yp, self.xp], dims=["y", "x"])
+        return density.rolling(x=7, y=7, center=True).mean()
 
 
 class MetpyImageMaker(ImageMakerBase):

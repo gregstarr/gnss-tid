@@ -50,6 +50,18 @@ class SpectralConfig:
     finding.  It has no effect on stored patch powers, which are always
     linear, and no effect on the single-pass branch (where ``argmax`` over
     height is invariant to monotone transforms).
+
+    ``density_thresh`` and ``min_patch_coverage`` implement the patch density
+    gate: when ``density_thresh`` is not ``None``, pixels with ``density`` at
+    or below the threshold are cut from a local copy of the image inside
+    :func:`compute_patch_spectra` before the patch FFT (the stored ``image``
+    stays unmasked), each patch's coverage is the fraction of its pixels above
+    the threshold, and :func:`extract_patch_peaks` masks ``F``/``Fx``/``Fy``
+    wherever coverage falls below ``min_patch_coverage`` so the objective,
+    height selection and center-finding seed only see data-supported patches.
+    ``density_thresh=None`` (default) applies no cut and
+    ``min_patch_coverage=0.0`` (default) disables the gate; both preserve the
+    legacy behaviour.
     """
 
     obs: pd.DataFrame
@@ -63,15 +75,18 @@ class SpectralConfig:
     lat_limits: tuple[float, float]
     lon_limits: tuple[float, float]
     proj: Local2D
+    density_thresh: float | None = None
+    min_patch_coverage: float = 0.0
 
 
 def compute_patch_spectra(
-    img: xarray.DataArray,
+    img: xarray.Dataset,
     block_size: int,
     block_step: int,
     window: xarray.DataArray,
-) -> xarray.DataArray:
-    """Compute the FFT patches for a given image.
+    density_thresh: float | None = None,
+) -> xarray.Dataset:
+    """Compute the FFT patches for a given image, with an optional density cut.
 
     Constructs overlapping blocks via a rolling window, applies the FFT
     windowing function, and returns the linear 2-D power spectrum of each
@@ -79,48 +94,104 @@ def compute_patch_spectra(
     spacing of ``img.x`` so the resulting ``kx``/``ky`` coords come out in
     cycles per km.
 
+    When ``density_thresh`` is given and ``img`` carries a ``density``
+    variable, pixels with ``density <= density_thresh`` are cut (NaN) from a
+    local copy of the image — on the already-high-passed image, at patch time —
+    and each patch's coverage (the fraction of its pixels above the threshold)
+    is returned alongside.  The cut image is zero-filled before the FFT, so
+    the input spectra are always finite; the coverage field lets callers gate
+    peak powers from patches dominated by data voids.  The stored ``image``
+    in ``img`` is never modified.
+
     Args:
-        img: Input image ``DataArray`` with dims ``(x, y)`` and a uniformly
-            spaced ``x`` coordinate (in km).
+        img: Image-maker ``Dataset`` with variables ``image`` and ``density``
+            on dims ``(y, x)`` and a uniformly spaced ``x`` coordinate (in
+            km).
         block_size: Edge length (pixels) of each square FFT block.
         block_step: Stride (in pixels) between consecutive block centres.
         window: FFT windowing array of shape ``(1, 1, block_size, block_size)``.
+        density_thresh: Minimum ``density`` (data points per pixel) required
+            for a pixel to enter the patch FFT; ``None`` (default) applies no
+            cut and skips the coverage computation.
 
     Returns:
-        A ``DataArray`` of 2-D power spectra with dims
-        ``(px, py, kx, ky)`` where ``px``, ``py`` are spatial patch centres
-        and ``kx``, ``ky`` are wavenumbers (cycles km⁻¹).
+        A ``Dataset`` with variable ``patch``: 2-D power spectra with dims
+        ``(py, px, kx, ky)`` where ``px``, ``py`` are spatial patch centres
+        and ``kx``, ``ky`` are wavenumbers (cycles km⁻¹).  When the cut is
+        applied, a ``patch_coverage`` variable ``(py, px)`` holds the fraction
+        of each patch's pixels with ``density > density_thresh``.
     """
     hres = float(np.diff(img.x.values).mean())
     wavenum = make_wavenum_grid(block_size, hres, shift=True)
-    patches = make_patches(img, block_size, block_step)
+    image = img.image
+    coverage = None
+    if density_thresh is not None and "density" in img:
+        cut = image.where(img.density > density_thresh)
+        coverage = make_patches(
+            cut.notnull().astype("float32"), block_size, block_step
+        ).mean(("kx", "ky"))
+        image = cut.fillna(0)
+    patches = make_patches(image, block_size, block_step)
     F = fft_patches(patches, window, Nfft=block_size, shift=True)
-    return (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
+    spectra = (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
+    out = xarray.Dataset({"patch": spectra})
+    if coverage is not None:
+        out["patch_coverage"] = coverage
+    return out
 
 
-def extract_patch_peaks(patch: xarray.DataArray) -> xarray.Dataset:
+def extract_patch_peaks(
+    patch: xarray.DataArray | xarray.Dataset, min_coverage: float = 0.0
+) -> xarray.Dataset:
     """Summarise an FFT patch array by its spectral peak.
 
     Selects the wavenumber ``(kx, ky)`` of the maximum power at each spatial
-    location and computes the total objective (sum over ``(px, py)``).
+    location and computes the total objective (sum over ``(px, py)``).  The
+    argmax always runs on the *ungated*, finite spectra — never on NaN.
+
+    When a ``patch_coverage`` field is available (Dataset input carrying the
+    coverage variable from :func:`compute_patch_spectra`) and
+    ``min_coverage > 0``, ``F``, ``Fx`` and ``Fy`` are masked (NaN) wherever
+    the patch coverage falls below ``min_coverage`` and the objective is
+    recomputed from the gated powers, so patches dominated by data voids are
+    excluded from the peak statistics.  A ``DataArray`` input or
+    ``min_coverage=0`` reproduces the ungated behaviour.
 
     Args:
-        patch: ``DataArray`` with dims ``(..., px, py, kx, ky)``.
+        patch: ``DataArray`` with dims ``(..., px, py, kx, ky)``, or a
+            ``Dataset`` holding that array as variable ``patch`` and
+            optionally ``patch_coverage`` ``(..., px, py)``.
+        min_coverage: Minimum patch coverage (fraction of pixels above
+            ``density_thresh``) required for a patch's peak powers to count;
+            ``0`` (default) disables the gate.
 
     Returns:
         A ``Dataset`` with variables:
 
-        - ``F`` ``(..., px, py)``: power at the spectral peak.
-        - ``Fx``, ``Fy`` ``(..., px, py)``: wavenumbers at the peak.
-        - ``objective`` ``(...,)``: sum of ``F`` over ``(px, py)``.
+        - ``F`` ``(..., px, py)``: power at the spectral peak (NaN where the
+          coverage gate excludes the patch).
+        - ``Fx``, ``Fy`` ``(..., px, py)``: wavenumbers at the peak (gated
+          like ``F``).
+        - ``objective`` ``(...,)``: sum of ``F`` over ``(px, py)`` (NaN
+          skipped).
     """
-    return (
-        patch.isel(patch.argmax(dim=["kx", "ky"]))
+    if isinstance(patch, xarray.Dataset):
+        coverage = patch.get("patch_coverage", None)
+        patch_da = patch["patch"]
+    else:
+        coverage = None
+        patch_da = patch
+    summary = (
+        patch_da.isel(patch_da.argmax(dim=["kx", "ky"]))
         .to_dataset(name="F")
         .reset_coords()
         .rename_vars({"kx": "Fx", "ky": "Fy"})
-        .assign(objective=lambda x: x.F.sum(dim=["px", "py"]))
     )
+    if coverage is not None and min_coverage > 0:
+        keep = coverage >= min_coverage
+        for var in ("F", "Fx", "Fy"):
+            summary[var] = summary[var].where(keep)
+    return summary.assign(objective=lambda x: x.F.sum(dim=["px", "py"]))
 
 
 def build_patch_stack(
@@ -128,7 +199,7 @@ def build_patch_stack(
     heights: np.ndarray,
     cfg: SpectralConfig,
     ch: WorkerChannel | None = None,
-) -> xarray.DataArray | None:
+) -> xarray.Dataset | None:
     """Compute FFT patches at each height without keeping the gridded images.
 
     Used by the first-pass worker in two-pass mode, where only the objective
@@ -142,8 +213,10 @@ def build_patch_stack(
         ch: Optional worker channel; one progress tick is emitted per height.
 
     Returns:
-        A ``DataArray`` of patches with dims ``(height, px, py, kx, ky)``, or
-        ``None`` if data retrieval failed for any height.
+        A ``Dataset`` with variable ``patch`` with dims
+        ``(height, py, px, kx, ky)``, plus ``patch_coverage``
+        ``(height, py, px)`` when ``cfg.density_thresh`` applies the density
+        cut, or ``None`` if data retrieval failed for any height.
     """
     ch = ch or WorkerChannel()
     patches = []
@@ -169,10 +242,11 @@ def build_patch_stack(
         img = generate_image(data, cfg.image_maker, cfg.tec_name)
         patches.append(
             compute_patch_spectra(
-                img.image,
+                img,
                 cfg.block_size,
                 cfg.block_step,
                 cfg.window,
+                density_thresh=cfg.density_thresh,
             )
         )
         ch.report()
@@ -198,8 +272,10 @@ def build_image_patch_stack(
 
     Returns:
         A ``Dataset`` with dims ``(height, x, y)`` containing variables
-        ``image``, ``patch``, and ``n`` (data-point count per height), or
-        ``None`` if data retrieval failed for any height.
+        ``image``, ``density``, ``n`` (data-point count per height),
+        ``patch`` ``(height, py, px, kx, ky)``, and ``patch_coverage``
+        ``(height, py, px)`` when ``cfg.density_thresh`` applies the density
+        cut, or ``None`` if data retrieval failed for any height.
     """
     ch = ch or WorkerChannel()
     images = []
@@ -228,19 +304,22 @@ def build_image_patch_stack(
         img = generate_image(data, cfg.image_maker, cfg.tec_name)
         patches.append(
             compute_patch_spectra(
-                img.image,
+                img,
                 cfg.block_size,
                 cfg.block_step,
                 cfg.window,
+                density_thresh=cfg.density_thresh,
             )
         )
         images.append(img)
         ch.report()
 
+    patches_ds = xarray.concat(patches, "height").assign_coords(height=heights)
     return (
         xarray.concat(images, "height")
         .assign_coords(height=heights)
-        .assign(n=(["height"], npts), patch=xarray.concat(patches, "height"))
+        .assign(n=(["height"], npts))
+        .merge(patches_ds)
     )
 
 
@@ -271,7 +350,9 @@ def compute_height_objectives_for_slice(
         patches = build_patch_stack(ts, heights, cfg, ch=ch)
         if patches is None:
             return None
-        return extract_patch_peaks(patches).objective.expand_dims(time=[time])
+        return extract_patch_peaks(
+            patches, min_coverage=cfg.min_patch_coverage
+        ).objective.expand_dims(time=[time])
 
 
 def _select_best_height_for_slice(
@@ -314,7 +395,7 @@ def _select_best_height_for_slice(
         data_all = build_image_patch_stack(ts, heights, cfg, ch=ch)
         if data_all is None:
             return None
-        summary = extract_patch_peaks(data_all.patch)
+        summary = extract_patch_peaks(data_all, min_coverage=cfg.min_patch_coverage)
         best_idx = int(summary.objective.argmax())
         best_height = float(heights[best_idx])
         best_slice = (
@@ -349,8 +430,9 @@ def _rebuild_slice_at_height(
             pass sets this to ``False`` to skip the patch computation.
 
     Returns:
-        A ``Dataset`` with variables ``image`` and ``density`` (plus ``patch``
-        when ``with_patch``), expanded along ``time``, or ``None`` if data
+        A ``Dataset`` with variables ``image`` and ``density`` (plus ``patch``,
+        and ``patch_coverage`` when the density cut applies, when
+        ``with_patch``), expanded along ``time``, or ``None`` if data
         retrieval failed.
     """
     with ch or WorkerChannel() as ch:
@@ -369,12 +451,15 @@ def _rebuild_slice_at_height(
         img = generate_image(data, cfg.image_maker, cfg.tec_name)
         if with_patch:
             p = compute_patch_spectra(
-                img.image,
+                img,
                 cfg.block_size,
                 cfg.block_step,
                 cfg.window,
+                density_thresh=cfg.density_thresh,
             )
-            img = img.assign(patch=p)
+            img = img.assign(patch=p.patch)
+            if "patch_coverage" in p:
+                img = img.assign(patch_coverage=p.patch_coverage)
         ch.report()
         return img.expand_dims(time=[time])
 
@@ -475,16 +560,30 @@ def _plot_objective_surface(
 
 
 def _build_sparse_image(
-    data_focused: xarray.Dataset, density_thresh: int
+    data_focused: xarray.Dataset, density_thresh: float | None
 ) -> xarray.Dataset:
     """Flatten the focus-height image stack into a sparse ``(time, row)`` table.
 
-    Pixels with density below ``density_thresh`` are masked out, and rows/times
-    that end up all-NaN are dropped.
+    Pixels with density at or below ``density_thresh`` are masked out — skipped
+    entirely when ``density_thresh`` is ``None`` — and rows/times that end up
+    all-NaN are dropped.
+
+    Args:
+        data_focused: Focused dataset with variables ``image`` and ``density``
+            on dims ``(time, x, y)``.
+        density_thresh: Minimum image density (data points per pixel) required
+            for a pixel to be included in the sparse image; ``None`` keeps
+            every pixel.
+
+    Returns:
+        A ``Dataset`` with ``image`` stacked as a sparse ``(time, row)`` table
+        with ``x``/``y`` index coordinates.
     """
+    image = data_focused.image
+    if density_thresh is not None and "density" in data_focused:
+        image = image.where(data_focused.density > density_thresh)
     return (
-        data_focused.image.where(data_focused.density > density_thresh)
-        .stack(row=("x", "y"))
+        image.stack(row=("x", "y"))
         .reset_index("row")
         .dropna(dim="time", how="all")
         .dropna(dim="row", how="all")
@@ -570,7 +669,11 @@ def _focus_with_time_smoothing(
     # track's sequence is used for center finding.
     rolling = {"time": time_window, "center": True, "min_periods": 1}
     smoothed_linear = obj_data.rolling(**rolling).mean()
-    smoothed_log = np.log10(obj_data).rolling(**rolling).mean()
+    # Fully-gated windows yield objective 0; log10(0) would be -inf, which the
+    # rolling mean does not skip (unlike NaN), so non-positive objectives are
+    # masked to NaN first and fully-gated windows are dropped exactly like
+    # failed ones.
+    smoothed_log = np.log10(obj_data.where(obj_data > 0)).rolling(**rolling).mean()
 
     focus_linear = _select_focus_height(smoothed_linear)
     focus_log = _select_focus_height(smoothed_log)
@@ -674,7 +777,9 @@ def _focus_with_time_smoothing(
             extras[f"image_{alt_suffix}"] = alt_image.reindex(time=focus_alt.time)
             extras[f"density_{alt_suffix}"] = alt_density.reindex(time=focus_alt.time)
     return (
-        data_focused.merge(extract_patch_peaks(data_focused.patch))
+        data_focused.merge(
+            extract_patch_peaks(data_focused, min_coverage=cfg.min_patch_coverage)
+        )
         .reindex(time=focus_height.time)
         .assign(height=focus_height.height)
         .assign(**extras)
@@ -688,7 +793,6 @@ def run_spectral_focusing(
     heights: np.ndarray,
     n_jobs: int,
     time_window: int = 1,
-    density_thresh: int = 20,
     center_finder: Callable | None = None,
 ) -> xarray.Dataset:
     """Unified spectral focusing pipeline.
@@ -717,6 +821,14 @@ def run_spectral_focusing(
        patches at the selected focus height, plus an image-only
        reconstruction at the alternative track's heights.
 
+    When ``cfg.density_thresh`` is set, the patch spectra are computed on a
+    density-cut, zero-filled copy of the image and peak powers from patches
+    whose coverage (fraction of pixels above ``cfg.density_thresh``) falls
+    below ``cfg.min_patch_coverage`` are gated to NaN, so the objective, the
+    height selection and the center-finding seed only see data-supported
+    patches; the stored ``image`` stays unmasked.  ``cfg.density_thresh=None``
+    (the dataclass default) disables the cut and the gate.
+
     Both modes optionally finish with a global center-finding step that fits
     source parameters jointly across all times on the
     ``logscale_objective``-selected sequence; the center-finding
@@ -728,8 +840,9 @@ def run_spectral_focusing(
 
     Args:
         cfg: Shared spectral configuration (observations, receiver table,
-            image maker, FFT-block geometry, windowing, region bounds, and
-            TEC variable name).  See :class:`SpectralConfig` for fields.
+            image maker, FFT-block geometry, windowing, region bounds, TEC
+            variable name, and the patch density gate).  See
+            :class:`SpectralConfig` for fields.
         window_size: Number of unique time steps per sliding window.
         step: Stride (in time steps) between consecutive windows.
         heights: Array of IPP heights (km) to search.
@@ -737,9 +850,6 @@ def run_spectral_focusing(
         time_window: Rolling-mean window length (in time steps) applied to the
             height-objective surface.  ``1`` disables smoothing (single-pass
             mode).  Default ``1``.
-        density_thresh: Minimum image density (data points per pixel) required
-            for a pixel to be included in the sparse image used for center
-            finding.  Default ``20``.
         center_finder: Callable ``(c0, w0, x, y, image) -> dict`` used for
             global source-parameter estimation.  ``None`` skips center
             finding entirely.  Default ``None``.
@@ -749,10 +859,18 @@ def run_spectral_focusing(
 
         - ``image`` ``(time, x, y)``: gridded TEC image at the focus height
           selected by the ``logscale_objective`` smoothing (two-pass mode).
-        - ``patch`` ``(time, px, py, kx, ky)``: FFT patch at the spectral peak.
-        - ``F``, ``Fx``, ``Fy`` ``(time, px, py)``: peak power and wavenumbers.
+        - ``patch`` ``(time, px, py, kx, ky)``: FFT patch spectra (computed on
+          the density-cut, zero-filled image when ``cfg.density_thresh`` is
+          set; ungated raw diagnostics).
+        - ``patch_coverage`` ``(time, px, py)``: fraction of each patch's
+          pixels above ``cfg.density_thresh`` (only present when the density
+          cut is applied).
+        - ``F``, ``Fx``, ``Fy`` ``(time, px, py)``: peak power and wavenumbers
+          (NaN where the patch coverage falls below
+          ``cfg.min_patch_coverage`` when the density cut applies).
         - ``objective`` ``(time,)``: summed peak power at the selected heights
-          (linear power; argmax over this picks the initialization window).
+          (linear power; NaN-skipping, so gated patches are excluded; argmax
+          over this picks the initialization window).
         - ``height`` ``(time,)``: focus height (km) of the main sequence.
         - ``objective_smoothed_linear``, ``objective_smoothed_log`` ``(time,)``:
           both smoothed objectives at their respective selected heights
@@ -817,7 +935,7 @@ def run_spectral_focusing(
         float(np.nanmax(init_slice.F.values)),
     )
 
-    fig, _ = plot_pre_center_finder(init_slice, density_thresh=density_thresh)
+    fig, _ = plot_pre_center_finder(init_slice, density_thresh=cfg.density_thresh)
     fig.savefig("plots/pre_center_finder.png")
     plt.close(fig)
 
@@ -829,7 +947,7 @@ def run_spectral_focusing(
     fig.savefig("plots/peak_patch.png")
     plt.close(fig)
 
-    fig, _ = plot_center_finder(data_focused, density_thresh=density_thresh)
+    fig, _ = plot_center_finder(data_focused, density_thresh=cfg.density_thresh)
     fig.savefig("plots/center_init.png")
     plt.close(fig)
 
@@ -838,7 +956,7 @@ def run_spectral_focusing(
         logger.info("center_finder not configured; skipping center finding")
         result = data_focused
     else:
-        sparse_img = _build_sparse_image(data_focused, density_thresh)
+        sparse_img = _build_sparse_image(data_focused, cfg.density_thresh)
 
         t_center_start = perf_counter()
         params = run_smoothed_center_finder(

@@ -321,7 +321,7 @@ def get_chunk_size(shape, step, patch, Nfft, mem, cx, cy=None):
     sf = 2 * Nfft**2 * px * py
     sr = cx * cy
     factor = sf / sr
-    logging.debug(f"img chunk target: {(mem/factor)/(2**20)}MB")
+    logging.debug(f"img chunk target: {(mem / factor) / (2**20)}MB")
     ct = ceil(((mem / 4) / factor) / sr)
     if (shape[1] // 2) < ct < shape[1]:
         logging.debug("balancing chunk size")
@@ -376,7 +376,7 @@ def estimate_parameters_dask(
     img = da.rechunk(img, chunk_size)
     log_ntasks("img rechunk", img)
     logging.debug(img)
-    logging.debug(f"img chunk size: {np.prod(img.chunksize)*4/(2**20)}MB")
+    logging.debug(f"img chunk size: {np.prod(img.chunksize) * 4 / (2**20)}MB")
 
     # IMG NOW DASK ARRAY
     if normalize == "image":
@@ -402,7 +402,7 @@ def estimate_parameters_dask(
     F = fft_patches(x, window, Nfft=Nfft, shift=True)
     log_ntasks("FFT", F)
     logging.debug(F)
-    logging.debug(f"FFT chunk size: {np.prod(F.chunksize)*8/(2**20)}MB")
+    logging.debug(f"FFT chunk size: {np.prod(F.chunksize) * 8 / (2**20)}MB")
 
     power = abs(F) ** 2
     log_ntasks("power", power)

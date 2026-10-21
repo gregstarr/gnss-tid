@@ -26,6 +26,7 @@ def scenario():
 # Geometry helpers
 # ---------------------------------------------------------------------------
 
+
 def test_intersect_shell():
     r = np.array([6378.137, 0, 0])
     s = np.array([8378.137, 0, 0])
@@ -51,6 +52,7 @@ def test_single_shell_tec_constant_ne():
 # ---------------------------------------------------------------------------
 # ShellGrid
 # ---------------------------------------------------------------------------
+
 
 def test_shell_grid_indexing():
     grid = ShellGrid(res_lat=1.0, res_lon=1.0)
@@ -93,6 +95,7 @@ def test_tec_scales_linearly_with_shells():
 # ---------------------------------------------------------------------------
 # SimulationScenario — receiver generation
 # ---------------------------------------------------------------------------
+
 
 def test_generate_random_receivers(scenario):
     n_rx = 1000
@@ -173,16 +176,19 @@ def test_generate_receiver_df_no_receivers(scenario):
 # TEC + observation table (manual satellites)
 # ---------------------------------------------------------------------------
 
+
 def test_generate_tec_and_observation_table():
     lat_range = (30.0, 40.0)
     lon_range = (-100.0, -90.0)
 
-    grid = ShellGrid(
-        res_lat=0.5, res_lon=0.5, lat_range=lat_range, lon_range=lon_range
-    )
+    grid = ShellGrid(res_lat=0.5, res_lon=0.5, lat_range=lat_range, lon_range=lon_range)
     grid.add_gaussian(
-        alt=300.0, lat0=35.0, lon0=-95.0,
-        sigma_lat=2.0, sigma_lon=2.0, amplitude=1e12,
+        alt=300.0,
+        lat0=35.0,
+        lon0=-95.0,
+        sigma_lat=2.0,
+        sigma_lon=2.0,
+        amplitude=1e12,
     )
     scenario = SimulationScenario(grid, delta_h_eff=10.0)
 
@@ -213,13 +219,12 @@ def test_generate_tec_and_observation_table():
 # RINEX nav-file integration
 # ---------------------------------------------------------------------------
 
+
 def test_observations_time_series_with_rinex():
     grid = ShellGrid()
     grid.add_uniform(300, 1.0)
 
-    scenario = SimulationScenario(
-        shell_grid=grid, nav_file=NAV_FILE, delta_h_eff=10.0
-    )
+    scenario = SimulationScenario(shell_grid=grid, nav_file=NAV_FILE, delta_h_eff=10.0)
     scenario.generate_uniform_grid_receivers(
         lat_range=(30, 40), lon_range=(-10, 0), n_lat=2, n_lon=2
     )

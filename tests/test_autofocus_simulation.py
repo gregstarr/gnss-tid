@@ -7,6 +7,7 @@ height.
 """
 
 from datetime import datetime
+from functools import lru_cache
 
 import numpy as np
 import pytest
@@ -40,16 +41,39 @@ def _build_scenario_obs(
     """Build a SimulationScenario with a single-shell wave and produce obs/rx.
 
     Uses the bundled GPS RINEX navigation file to place satellites at a
-    realistic constellation geometry for ``BASE_TIME``.
+    realistic constellation geometry for ``BASE_TIME``.  Builds are cached per
+    argument set and returned as copies, so the gated and ungated variants of
+    the same scenario share one RINEX parse and one observation build.
     """
+    obs, rx = _cached_scenario_obs(
+        true_height,
+        lat_range,
+        lon_range,
+        n_rx_per_side,
+        k_lat,
+        k_lon,
+        amplitude,
+        seed,
+    )
+    return obs.copy(), rx.copy()
+
+
+@lru_cache(maxsize=8)
+def _cached_scenario_obs(
+    true_height: float,
+    lat_range: tuple[float, float],
+    lon_range: tuple[float, float],
+    n_rx_per_side: int,
+    k_lat: float,
+    k_lon: float,
+    amplitude: float,
+    seed: int,
+):
+    """Run the RINEX-based scenario build once per argument set."""
     np.random.seed(seed)
 
-    grid = ShellGrid(
-        res_lat=0.2, res_lon=0.2, lat_range=lat_range, lon_range=lon_range
-    )
-    grid.add_wave(
-        alt=true_height, k_lat=k_lat, k_lon=k_lon, amplitude=amplitude
-    )
+    grid = ShellGrid(res_lat=0.2, res_lon=0.2, lat_range=lat_range, lon_range=lon_range)
+    grid.add_wave(alt=true_height, k_lat=k_lat, k_lon=k_lon, amplitude=amplitude)
 
     scenario = SimulationScenario(grid, delta_h_eff=10.0, nav_file=NAV_FILE)
     scenario.generate_uniform_grid_receivers(
@@ -59,7 +83,9 @@ def _build_scenario_obs(
     # Single time step: the time-series helper handles populating
     # ``scenario.satellites`` / ``sv_names`` from the nav file.
     obs = scenario.generate_observations_time_series(
-        start_time=BASE_TIME, end_time=BASE_TIME, sample_rate=1.0,
+        start_time=BASE_TIME,
+        end_time=BASE_TIME,
+        sample_rate=1.0,
     )
     # Drop below-horizon rays and any satellites whose ephemeris produced NaN
     # geometry — neither carries usable TEC information.
@@ -80,6 +106,8 @@ def _build_spectral_cfg(
     block_size: int = 32,
     block_step: int = 16,
     hres: float = 20.0,
+    density_thresh: float | None = None,
+    min_patch_coverage: float = 0.0,
 ) -> SpectralConfig:
     image_maker = ScipyRbfImageMaker(
         hres=hres,
@@ -89,9 +117,7 @@ def _build_spectral_cfg(
         kernel="multiquadric",
         smoothing=0.3,
     )
-    window = make_kaiser_2d(block_size, beta=1.0).reshape(
-        1, 1, block_size, block_size
-    )
+    window = make_kaiser_2d(block_size, beta=1.0).reshape(1, 1, block_size, block_size)
     proj = Local2D.from_geodetic(
         float(np.mean(lat_range)),
         float(np.mean(lon_range)),
@@ -112,6 +138,8 @@ def _build_spectral_cfg(
         lat_limits=lat_range,
         lon_limits=lon_range,
         proj=proj,
+        density_thresh=density_thresh,
+        min_patch_coverage=min_patch_coverage,
     )
 
 
@@ -139,7 +167,10 @@ def test_autofocus_recovers_wave_height(true_height):
     )
 
     cfg = _build_spectral_cfg(
-        obs, rx, lat_range, lon_range,
+        obs,
+        rx,
+        lat_range,
+        lon_range,
         center_height=float(np.median(candidate_heights)),
     )
 
@@ -187,7 +218,11 @@ def test_autofocus_objective_peaks_above_noise():
     )
 
     cfg = _build_spectral_cfg(
-        obs, rx, lat_range, lon_range, center_height=true_height,
+        obs,
+        rx,
+        lat_range,
+        lon_range,
+        center_height=true_height,
     )
 
     time_windows = make_time_windows(obs["time"], window=1, step=1)
@@ -211,4 +246,62 @@ def test_autofocus_objective_peaks_above_noise():
     assert objectives[true_idx] > 1.5 * objectives.min(), (
         f"focus signal too weak: peak={objectives[true_idx]:.3g}, "
         f"min={objectives.min():.3g}"
+    )
+
+
+@pytest.mark.parametrize("true_height", [220.0, 320.0])
+def test_autofocus_recovers_wave_height_with_gate(true_height):
+    """Height recovery must survive the patch density gate.
+
+    Same scenario as :func:`test_autofocus_recovers_wave_height`, but with the
+    density cut (``density_thresh=10``) and the coverage gate
+    (``min_patch_coverage=0.5``) enabled.  The simulated observations give most
+    patches enough coverage (edge patches are gated), so the objective must
+    still peak at the true height.
+    """
+    lat_range = (25.0, 45.0)
+    lon_range = (-110.0, -85.0)
+    candidate_heights = np.arange(150, 450, 10)
+
+    obs, rx = _build_scenario_obs(
+        true_height=true_height,
+        lat_range=lat_range,
+        lon_range=lon_range,
+        n_rx_per_side=20,
+        k_lat=3.0,
+        k_lon=3.0,
+        amplitude=10.0,
+        seed=42,
+    )
+
+    cfg = _build_spectral_cfg(
+        obs,
+        rx,
+        lat_range,
+        lon_range,
+        center_height=float(np.median(candidate_heights)),
+        density_thresh=10,
+        min_patch_coverage=0.5,
+    )
+
+    time_windows = make_time_windows(obs["time"], window=1, step=1)
+    assert len(time_windows) == 1, (
+        f"expected one time window for the single simulated epoch, "
+        f"got {len(time_windows)}"
+    )
+    patches = build_patch_stack(time_windows[0], candidate_heights, cfg)
+    assert patches is not None, "patches computation failed — no IPP data?"
+    assert "patch_coverage" in patches, (
+        "density_thresh is set, so the patch stack must carry patch_coverage"
+    )
+
+    summary = extract_patch_peaks(patches, min_coverage=cfg.min_patch_coverage)
+    objectives = summary.objective.values
+    best_idx = int(np.argmax(objectives))
+    recovered = float(candidate_heights[best_idx])
+
+    assert recovered == pytest.approx(true_height), (
+        f"autofocus picked {recovered} km, expected {true_height} km. "
+        f"objectives: "
+        f"{dict(zip(candidate_heights.tolist(), objectives.tolist(), strict=True))}"
     )

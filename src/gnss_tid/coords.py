@@ -5,7 +5,6 @@ from scipy.spatial.transform import Rotation
 
 
 class Local2D:
-
     def __init__(self, x: float, y: float, z: float):
         """
         Parameters
@@ -16,9 +15,7 @@ class Local2D:
         self.radius = np.linalg.norm(self.origin)
         self.phi = np.rad2deg(np.arctan2(y, x))
         self.theta = np.rad2deg(np.arcsin(z / self.radius))
-        self.r = Rotation.from_euler(
-            "ZX", [self.phi + 90, 90 - self.theta], degrees=True
-        )
+        self.r = Rotation.from_euler("ZX", [self.phi + 90, 90 - self.theta], degrees=True)
         test = self.r.apply(self.origin, inverse=True)
         assert np.all(np.isclose(test[:2], 0))
         self.i_geo = self.r.apply([1, 0, 0])
@@ -26,7 +23,7 @@ class Local2D:
     @classmethod
     def from_geodetic(
         cls, lat: float, lon: float, height: float, km: bool = True
-        ) -> "Local2D":
+    ) -> "Local2D":
         """creates Local2D object from geodetic coordinates, converts meters to km
 
         Parameters
@@ -106,12 +103,12 @@ class Local2D:
 
 def spherical2ecef(lat: np.ndarray, lon: np.ndarray, radius: np.ndarray):
     """convert spherical coordinates to ECEF
-    
+
     Parameters
     ----------
     lat, lon: spherical coordinates in degrees
     radius: radius from earth center
-    
+
     Returns
     -------
     Nx3 vector of ecef coordinates
@@ -134,11 +131,11 @@ def spherical2ecef(lat: np.ndarray, lon: np.ndarray, radius: np.ndarray):
 
 def ecef2spherical(x: np.ndarray, y: np.ndarray, z: np.ndarray):
     """convert ECEF coordinates to spherical
-    
+
     Parameters
     ----------
     x, y, z: ecef coordinates
-    
+
     Returns
     -------
     lat, lon: spherical coordinates
@@ -176,18 +173,20 @@ def aer2ipp(az, el, rxp, H=350.0):
             lat0 = rxp[0]
             lon0 = rxp[1]
         else:
-            lat0 = rxp[:,0]
-            lon0 = rxp[:,1]
+            lat0 = rxp[:, 0]
+            lon0 = rxp[:, 1]
 
     Req = 6378.137
-    f = 1/298.257223563
+    f = 1 / 298.257223563
 
-    R = np.sqrt(Req**2 / (1 + (1/(1-f)**2 -1) * np.sin(np.radians(lat0))**2))
+    R = np.sqrt(Req**2 / (1 + (1 / (1 - f) ** 2 - 1) * np.sin(np.radians(lat0)) ** 2))
 
-    psi = (np.pi/2 - np.radians(el)) - np.arcsin(R / (R+H) * np.cos(np.radians(el)))
+    psi = (np.pi / 2 - np.radians(el)) - np.arcsin(R / (R + H) * np.cos(np.radians(el)))
 
-    lat = np.arcsin(np.sin(np.radians(lat0)) * np.cos(psi) + \
-                    np.cos(np.radians(lat0)) * np.sin(psi) * np.cos(np.radians(az)))
+    lat = np.arcsin(
+        np.sin(np.radians(lat0)) * np.cos(psi)
+        + np.cos(np.radians(lat0)) * np.sin(psi) * np.cos(np.radians(az))
+    )
 
     lon = np.radians(lon0) + np.arcsin(np.sin(psi) * np.sin(np.radians(az)) / np.cos(lat))
 

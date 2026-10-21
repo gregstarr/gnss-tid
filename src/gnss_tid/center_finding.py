@@ -55,8 +55,7 @@ class CenterModel(nn.Module):
         offsets = torch.linspace(0.0, 2.0 * torch.pi, PHASE_BINS_STATIONARY)
         vals = (
             torch.sum(
-                torch.cos(phase[:, :, None] + offsets[None, None, :])
-                * tid[:, :, None],
+                torch.cos(phase[:, :, None] + offsets[None, None, :]) * tid[:, :, None],
                 dim=0,
             )
             / n_fin[:, None]
@@ -258,9 +257,7 @@ def run_stationary_center_finder(
     return result
 
 
-def find_center(
-    pts: np.ndarray, vectors: np.ndarray, weights: np.ndarray
-) -> np.ndarray:
+def find_center(pts: np.ndarray, vectors: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Least-squares estimate of the wave centre from spectral patch vectors.
 
     Pure-numpy helper distinct from the torch-based finders; used to initialize
@@ -275,12 +272,7 @@ def find_center(
         ``(2,)`` estimated centre coordinates.
     """
     vec_norm = np.linalg.norm(vectors, axis=1)
-    mask = (
-        (vec_norm > 0)
-        & np.isfinite(vec_norm)
-        & np.isfinite(weights)
-        & (weights > 0)
-    )
+    mask = (vec_norm > 0) & np.isfinite(vec_norm) & np.isfinite(weights) & (weights > 0)
     if not np.any(mask):
         return np.array([np.nan, np.nan])
     w = np.sqrt(weights[mask]) / vec_norm[mask]
@@ -323,9 +315,7 @@ def find_center_grid_search(
         ``(Ny, Nx)`` score surface.
     """
     kmag = np.linalg.norm(vectors, axis=1)
-    mask = (
-        (kmag > 0) & np.isfinite(kmag) & np.isfinite(weights) & (weights > 0)
-    )
+    mask = (kmag > 0) & np.isfinite(kmag) & np.isfinite(weights) & (weights > 0)
     XD, YD = np.meshgrid(grid_x, grid_y)
     score = np.zeros(XD.size)
     if not np.any(mask):
@@ -342,13 +332,11 @@ def find_center_grid_search(
         end = start + chunk
         dx = gx[:, None] - pts_m[start:end, 0][None, :]
         dy = gy[:, None] - pts_m[start:end, 1][None, :]
-        d = np.abs(
-            vec_m[start:end, 0][None, :] * dy
-            - vec_m[start:end, 1][None, :] * dx
-        ) / k_m[start:end][None, :]
-        score += np.sum(
-            w_m[start:end][None, :] * np.exp(-(d / sigma) ** 2), axis=1
+        d = (
+            np.abs(vec_m[start:end, 0][None, :] * dy - vec_m[start:end, 1][None, :] * dx)
+            / k_m[start:end][None, :]
         )
+        score += np.sum(w_m[start:end][None, :] * np.exp(-((d / sigma) ** 2)), axis=1)
 
     score = score.reshape(XD.shape)
     best = int(np.argmax(score))
@@ -379,12 +367,7 @@ def find_center_huber(
         ``(2,)`` estimated centre coordinates.
     """
     vec_norm = np.linalg.norm(vectors, axis=1)
-    mask = (
-        (vec_norm > 0)
-        & np.isfinite(vec_norm)
-        & np.isfinite(weights)
-        & (weights > 0)
-    )
+    mask = (vec_norm > 0) & np.isfinite(vec_norm) & np.isfinite(weights) & (weights > 0)
     if not np.any(mask):
         return np.array([np.nan, np.nan])
     inv_v = 1.0 / vec_norm[mask]

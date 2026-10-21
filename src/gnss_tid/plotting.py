@@ -19,6 +19,10 @@ def _get_masked_image(data, density_thresh):
 def _mark_max_patch(ax, data, label=None):
     """Draw a red ring at the patch with the highest finite peak power.
 
+    Gated patches (``F`` NaN from the patch density gate) are excluded by the
+    ``skipna`` argmax, so the ring marks the highest-power data-supported
+    patch.
+
     Args:
         ax: Matplotlib axes to draw on.
         data: Dataset holding variable ``F`` on the patch-centre dims ``px``
@@ -32,7 +36,7 @@ def _mark_max_patch(ax, data, label=None):
     Fv = np.asarray(data.F.values)
     if not (Fv.size and np.any(np.isfinite(Fv))):
         return []
-    peak = data.F.argmax(dim=["px", "py"])
+    peak = data.F.argmax(dim=["px", "py"], skipna=True)
     return ax.plot(
         [float(data.px.isel(px=peak["px"]).item())],
         [float(data.py.isel(py=peak["py"]).item())],
@@ -198,8 +202,15 @@ def plot_peak_patch_spectrum(data):
 
     Picks the ``(px, py)`` location with maximum ``F`` and shows its full
     ``(kx, ky)`` spectrum, to confirm the peak is a real lobe rather than a
-    single noisy bin.
+    single noisy bin.  When ``F`` holds no finite value (every patch gated by
+    the density cut), an empty figure titled accordingly is returned instead
+    of raising on the all-NaN argmax.
     """
+    Fv = np.asarray(data.F.values)
+    if not (Fv.size and np.any(np.isfinite(Fv))):
+        fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
+        ax.set_title("all patches gated: no finite peak power")
+        return fig, ax
     peak = data.F.argmax(dim=["px", "py"])
     fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
     data.patch.isel(peak).plot(ax=ax)
@@ -331,8 +342,9 @@ def make_animation(
     cursor at the current time, a per-patch peak power map (``F`` over the
     patch-centre coordinates ``px``/``py``, shared color scale across frames),
     and a lower map panel showing the masked TEC image, fitted ring circles
-    (only when center finding ran), and a red ring marking the
-    highest-objective FFT patch at each time step.
+    (only when center finding ran), and a red ring marking the highest-power
+    *data-supported* FFT patch at each time step (patches gated to NaN by the
+    density cut are excluded).
 
     Args:
         data: Result dataset with dims ``(time,)`` for ``height`` and
