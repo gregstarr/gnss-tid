@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -51,6 +52,11 @@ class SpectralConfig:
     linear, and no effect on the single-pass branch (where ``argmax`` over
     height is invariant to monotone transforms).
 
+    ``normalization`` controls the amplitude scaling used only to calculate
+    patch spectra: ``"image"`` z-scores the complete image, ``"patch"``
+    z-scores every extracted patch, and ``None`` preserves the raw image
+    amplitudes.  The stored ``image`` is never normalized.
+
     ``density_thresh`` and ``min_patch_coverage`` implement the patch density
     gate: when ``density_thresh`` is not ``None``, pixels with ``density`` at
     or below the threshold are cut from a local copy of the image inside
@@ -77,6 +83,7 @@ class SpectralConfig:
     proj: Local2D
     density_thresh: float | None = None
     min_patch_coverage: float = 0.0
+    normalization: Literal["image", "patch"] | None = None
 
 
 def compute_patch_spectra(
@@ -85,8 +92,9 @@ def compute_patch_spectra(
     block_step: int,
     window: xarray.DataArray,
     density_thresh: float | None = None,
+    normalization: Literal["image", "patch"] | None = None,
 ) -> xarray.Dataset:
-    """Compute the FFT patches for a given image, with an optional density cut.
+    """Compute FFT patches with optional density cutting and normalization.
 
     Constructs overlapping blocks via a rolling window, applies the FFT
     windowing function, and returns the linear 2-D power spectrum of each
@@ -103,6 +111,11 @@ def compute_patch_spectra(
     peak powers from patches dominated by data voids.  The stored ``image``
     in ``img`` is never modified.
 
+    ``normalization="image"`` z-scores the full image before blocks are
+    extracted.  ``normalization="patch"`` z-scores each extracted block.  In
+    both modes normalization applies only to the image copy used for patch
+    spectra; ``img.image`` is not modified.  ``None`` preserves raw amplitude.
+
     Args:
         img: Image-maker ``Dataset`` with variables ``image`` and ``density``
             on dims ``(y, x)`` and a uniformly spaced ``x`` coordinate (in
@@ -113,6 +126,9 @@ def compute_patch_spectra(
         density_thresh: Minimum ``density`` (data points per pixel) required
             for a pixel to enter the patch FFT; ``None`` (default) applies no
             cut and skips the coverage computation.
+        normalization: ``"image"`` z-scores the full image, ``"patch"``
+            z-scores each extracted block, and ``None`` (default) leaves
+            amplitudes unchanged.
 
     Returns:
         A ``Dataset`` with variable ``patch``: 2-D power spectra with dims
@@ -121,6 +137,11 @@ def compute_patch_spectra(
         applied, a ``patch_coverage`` variable ``(py, px)`` holds the fraction
         of each patch's pixels with ``density > density_thresh``.
     """
+    if normalization not in (None, "image", "patch"):
+        raise ValueError(
+            "normalization must be one of None, 'image', or 'patch'; "
+            f"got {normalization!r}"
+        )
     hres = float(np.diff(img.x.values).mean())
     wavenum = make_wavenum_grid(block_size, hres, shift=True)
     image = img.image
@@ -131,7 +152,11 @@ def compute_patch_spectra(
             cut.notnull().astype("float32"), block_size, block_step
         ).mean(("kx", "ky"))
         image = cut.fillna(0)
+    if normalization == "image":
+        image = (image - image.mean(("x", "y"))) / image.std(("x", "y"))
     patches = make_patches(image, block_size, block_step)
+    if normalization == "patch":
+        patches = (patches - patches.mean(("kx", "ky"))) / patches.std(("kx", "ky"))
     F = fft_patches(patches, window, Nfft=block_size, shift=True)
     spectra = (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
     out = xarray.Dataset({"patch": spectra})
@@ -247,6 +272,7 @@ def build_patch_stack(
                 cfg.block_step,
                 cfg.window,
                 density_thresh=cfg.density_thresh,
+                normalization=cfg.normalization,
             )
         )
         ch.report()
@@ -309,6 +335,7 @@ def build_image_patch_stack(
                 cfg.block_step,
                 cfg.window,
                 density_thresh=cfg.density_thresh,
+                normalization=cfg.normalization,
             )
         )
         images.append(img)
@@ -456,6 +483,7 @@ def _rebuild_slice_at_height(
                 cfg.block_step,
                 cfg.window,
                 density_thresh=cfg.density_thresh,
+                normalization=cfg.normalization,
             )
             img = img.assign(patch=p.patch)
             if "patch_coverage" in p:
@@ -829,6 +857,10 @@ def run_spectral_focusing(
     patches; the stored ``image`` stays unmasked.  ``cfg.density_thresh=None``
     (the dataclass default) disables the cut and the gate.
 
+    ``cfg.normalization`` may z-score each image (``"image"``) or each patch
+    (``"patch"``) before its FFT; ``None`` leaves raw amplitudes unchanged.
+    This scaling affects only patch spectra, never the stored images.
+
     Both modes optionally finish with a global center-finding step that fits
     source parameters jointly across all times on the
     ``logscale_objective``-selected sequence; the center-finding
@@ -841,7 +873,7 @@ def run_spectral_focusing(
     Args:
         cfg: Shared spectral configuration (observations, receiver table,
             image maker, FFT-block geometry, windowing, region bounds, TEC
-            variable name, and the patch density gate).  See
+            variable name, patch density gate, and normalization mode).  See
             :class:`SpectralConfig` for fields.
         window_size: Number of unique time steps per sliding window.
         step: Stride (in time steps) between consecutive windows.

@@ -23,9 +23,10 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
     finding (logged at INFO level) and the result has no ``center``,
     ``wavelength``, ``offset`` or ``phase`` variables.
 
-    The ``density_thresh`` and ``min_patch_coverage`` focus-config keys drive
-    the patch density gate and are passed into the ``SpectralConfig`` (they
-    are per-worker static inputs, not run-level orchestration knobs).
+    The ``density_thresh``, ``min_patch_coverage``, and ``normalization``
+    focus-config keys control patch-spectrum calculation and are passed into
+    ``SpectralConfig`` (they are per-worker static inputs, not run-level
+    orchestration knobs).
 
     Args:
         obs: Observation DataFrame returned by load_observations.
@@ -78,6 +79,7 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         proj=proj,
         density_thresh=cfg.focus.density_thresh,
         min_patch_coverage=cfg.focus.min_patch_coverage,
+        normalization=cfg.focus.normalization,
     )
     orchestration_kwargs = {
         "window_size": cfg.sample.window,

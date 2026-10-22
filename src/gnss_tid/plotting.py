@@ -127,9 +127,11 @@ def plot_pre_center_finder(data, density_thresh=None):
     """Diagnostic plot of the raw inputs to ``find_center``.
 
     Image + per-patch wavevector quiver, with **no** center estimates
-    overlaid.  The highest-objective patch (maximum ``F``) is marked with a
-    red ring.  Use this when ``find_center`` itself fails (returns NaN or
-    nonsense) to inspect what went into it.
+    overlaid, next to a per-patch peak power map of ``F`` over the
+    patch-centre coordinates (as in the ``event.gif`` power panel).  The
+    highest-objective patch (maximum ``F``) is marked with a red ring on
+    both panels.  Use this when ``find_center`` itself fails (returns NaN
+    or nonsense) to inspect what went into it.
 
     Args:
         data: Single time-slice dataset with dims ``(px, py)`` for the patch
@@ -139,12 +141,18 @@ def plot_pre_center_finder(data, density_thresh=None):
             required for a pixel to be shown; ``None`` shows the full image.
 
     Returns:
-        A ``(fig, ax)`` tuple for the caller to save or annotate further.
+        A ``(fig, ax)`` tuple with ``ax`` a length-2 array of axes
+        ``(image+quiver, patch power)`` for the caller to save or annotate
+        further.
     """
-    fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
-    plot_patches(data, ax=ax, img=True, density_thresh=density_thresh)
-    if _mark_max_patch(ax, data, label="max objective patch"):
-        ax.legend()
+    fig, ax = plt.subplots(1, 2, figsize=(12, 5), tight_layout=True)
+    plot_patches(data, ax=ax[0], img=True, density_thresh=density_thresh)
+    marked = _mark_max_patch(ax[0], data, label="max objective patch")
+    if marked:
+        ax[0].legend()
+    data.F.plot(ax=ax[1])
+    ax[1].set_title("patch power")
+    _mark_max_patch(ax[1], data)
     return fig, ax
 
 

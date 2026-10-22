@@ -1,6 +1,7 @@
 defaults:
   - image_maker: rbf
-  - center_finder: stationary
+
+center_finder: null
 
 height_min: 100
 height_max: 600
@@ -9,6 +10,8 @@ block_size: 32
 block_step: 16
 kaiser_beta: 1
 logscale_objective: true
-density_thresh: 10
+density_thresh: 2
+min_patch_coverage: 0.25
+normalization: null
 time_window: 15
-n_jobs: 10
+n_jobs: 12

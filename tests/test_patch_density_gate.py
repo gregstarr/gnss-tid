@@ -140,6 +140,57 @@ def test_patch_coverage_disabled_reproduces_legacy():
     np.testing.assert_allclose(out.patch.values, _legacy_patch_spectra(ds).values)
 
 
+def test_image_normalization_zscores_full_image():
+    """Image normalization z-scores before extracting FFT patches."""
+    ds = _make_image_dataset()
+    out = compute_patch_spectra(
+        ds,
+        BLOCK_SIZE,
+        BLOCK_STEP,
+        _make_window(),
+        normalization="image",
+    )
+
+    normalized = (ds.image - ds.image.mean(("x", "y"))) / ds.image.std(("x", "y"))
+    expected = fft_patches(
+        make_patches(normalized, BLOCK_SIZE, BLOCK_STEP),
+        _make_window(),
+        Nfft=BLOCK_SIZE,
+        shift=True,
+    )
+    np.testing.assert_allclose(out.patch.values, (abs(expected) ** 2).values)
+    np.testing.assert_allclose(ds.image.values, _make_image_dataset().image.values)
+
+
+def test_patch_normalization_zscores_each_patch():
+    """Patch normalization z-scores each extracted FFT block independently."""
+    ds = _make_image_dataset()
+    out = compute_patch_spectra(
+        ds,
+        BLOCK_SIZE,
+        BLOCK_STEP,
+        _make_window(),
+        normalization="patch",
+    )
+
+    patches = make_patches(ds.image, BLOCK_SIZE, BLOCK_STEP)
+    normalized = (patches - patches.mean(("kx", "ky"))) / patches.std(("kx", "ky"))
+    expected = fft_patches(normalized, _make_window(), Nfft=BLOCK_SIZE, shift=True)
+    np.testing.assert_allclose(out.patch.values, (abs(expected) ** 2).values)
+
+
+def test_invalid_normalization_is_rejected():
+    """Patch spectra reject normalization modes outside the public choices."""
+    with np.testing.assert_raises_regex(ValueError, "normalization must be"):
+        compute_patch_spectra(
+            _make_image_dataset(),
+            BLOCK_SIZE,
+            BLOCK_STEP,
+            _make_window(),
+            normalization="invalid",
+        )
+
+
 def test_extract_patch_peaks_gate():
     """Coverage + ``min_coverage`` gates the peaks; ``min_coverage=0`` does not."""
     ds = _make_image_dataset(hole=False)

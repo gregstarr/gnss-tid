@@ -4,7 +4,7 @@ latitude_limits:
   - 24.0
   - 51.0
 longitude_limits:
-  - -126.0
+  - -100.0
   - -70.0
 time_limits:
   - "20170820_120000"
