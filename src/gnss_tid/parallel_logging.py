@@ -44,7 +44,7 @@ import threading
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from logging.handlers import QueueHandler, QueueListener
-from multiprocessing import Manager
+from multiprocessing import get_context
 from os import getpid
 from typing import Any
 
@@ -98,6 +98,29 @@ class WorkerChannel:
         self.progress_queue.put(n)
 
 
+_spawn_manager = None
+
+
+def _spawn_manager_queue() -> Any:
+    """Return a multiprocessing queue from a per-process spawn-context manager.
+
+    The manager server is spawned rather than forked, so creating queues
+    while the parent is multi-threaded (e.g. inside an active joblib/loky
+    executor) cannot fork a multi-threaded process into a deadlocked child.
+    One manager server is cached per process: extra ``Queue()`` calls on a
+    running manager are cheap (no fork, no new server), and the server lives
+    until the process exits.
+
+    Returns:
+        A ``multiprocessing`` queue backed by the cached spawn-context
+        manager server.
+    """
+    global _spawn_manager
+    if _spawn_manager is None:
+        _spawn_manager = get_context("spawn").Manager()
+    return _spawn_manager.Queue()
+
+
 @contextmanager
 def log_queue_listener():
     """Yield a multiprocessing log queue with a running ``QueueListener``.
@@ -106,7 +129,7 @@ def log_queue_listener():
     root logger, respecting each handler's own level, and is stopped cleanly
     on exit.
     """
-    q = Manager().Queue()
+    q = _spawn_manager_queue()
     listener = QueueListener(q, *logging.getLogger().handlers, respect_handler_level=True)
     listener.start()
     try:
@@ -151,7 +174,7 @@ def progress_queue_listener(total: int, desc: str):
     handler it replaces so e.g. Hydra's ``console.level: WARNING`` keeps
     INFO records off the console while the bar is live.
     """
-    q = Manager().Queue()
+    q = _spawn_manager_queue()
     level = _console_level()
     with logging_redirect_tqdm():
         for handler in logging.getLogger().handlers:

@@ -156,46 +156,44 @@ def plot_pre_center_finder(data, density_thresh=None):
     return fig, ax
 
 
-def plot_objective_lines(data, logscale=False):
-    """Plot the height-selected and smoothed objectives over time.
+def plot_objective_surfaces(
+    raw_surface: xarray.DataArray,
+    raw_height_track: xarray.DataArray,
+    smoothed_surface: xarray.DataArray | None = None,
+    smoothed_height_track: xarray.DataArray | None = None,
+):
+    """Plot raw and optionally time-smoothed height-objective heatmaps.
 
-    The first line is the unsmoothed objective at each time's selected focus
-    height, plotted as ``log10(objective)`` when ``logscale`` is set so it
-    shares units with the smoothed line.  The second line — only drawn when a
-    smoothed objective is present (two-pass mode) — is the time-smoothed
-    objective surface at the ``logscale_objective``-selected height, i.e. the
-    quantity that drives height selection and center finding.
+    A sequential colormap is always used; a log objective surface can span
+    negative values, for which xarray's default would pick a divergent map.
 
     Args:
-        data: Result dataset with dim ``(time,)``, variable ``objective``
-            ``(time,)`` (unsmoothed objective at the selected height, linear
-            power), and one of ``objective_smoothed`` (legacy) or
-            ``objective_smoothed_linear`` / ``objective_smoothed_log``
-            ``(time,)`` (smoothed objectives at their respective selected
-            heights; linear power for the linear track, log10 units for the
-            log track).
-        logscale: Whether ``logscale_objective`` was set for the run.
+        raw_surface: Unsmoothed objective surface with dims ``(time, height)``.
+        raw_height_track: Selected-height track for ``raw_surface`` with dim
+            ``(time,)`` and a ``height`` coordinate.
+        smoothed_surface: Time-smoothed objective surface with dims
+            ``(time, height)``, or ``None`` when time smoothing is disabled.
+        smoothed_height_track: Selected-height track for ``smoothed_surface``,
+            or ``None`` when time smoothing is disabled.
 
     Returns:
-        A ``(fig, ax)`` tuple for the caller to save or annotate further.
+        A ``(fig, axes)`` tuple. ``axes`` contains the raw panel and, when
+        smoothing inputs are provided, a second time-smoothed panel; panels
+        are laid out in one row, side by side.
     """
-    fig, ax = plt.subplots(figsize=(8, 4), tight_layout=True)
-    first = np.log10(data.objective) if logscale else data.objective
-    first.plot.line(ax=ax, label="height-selected objective")
-    if "objective_smoothed" in data:
-        smoothed = data.objective_smoothed
-    elif logscale and "objective_smoothed_log" in data:
-        smoothed = data.objective_smoothed_log
-    elif "objective_smoothed_linear" in data:
-        smoothed = data.objective_smoothed_linear
-    else:
-        smoothed = None
-    if smoothed is not None:
-        smoothed.plot.line(ax=ax, label="smoothed objective")
-    ax.set_ylabel("log10 objective" if logscale else "objective")
-    ax.grid(True)
-    ax.legend()
-    return fig, ax
+    surfaces = [("raw", raw_surface, raw_height_track)]
+    if smoothed_surface is not None and smoothed_height_track is not None:
+        surfaces.append(("time-smoothed", smoothed_surface, smoothed_height_track))
+
+    fig, axes = plt.subplots(
+        1, len(surfaces), figsize=(6 * len(surfaces), 5), tight_layout=True
+    )
+    axes = np.atleast_1d(axes)
+    for ax, (title, surface, height_track) in zip(axes, surfaces, strict=True):
+        surface.plot(ax=ax, cmap="viridis")
+        ax.plot(height_track, height_track.time, "r.-")
+        ax.set_title(title)
+    return fig, axes
 
 
 def plot_density_map(data):
@@ -206,13 +204,27 @@ def plot_density_map(data):
 
 
 def plot_peak_patch_spectrum(data):
-    """2-D power spectrum of the patch with the largest peak power.
+    """2-D power spectrum and matching image patch of the strongest patch.
 
     Picks the ``(px, py)`` location with maximum ``F`` and shows its full
-    ``(kx, ky)`` spectrum, to confirm the peak is a real lobe rather than a
-    single noisy bin.  When ``F`` holds no finite value (every patch gated by
-    the density cut), an empty figure titled accordingly is returned instead
-    of raising on the all-NaN argmax.
+    ``(kx, ky)`` spectrum (``kx`` on the horizontal axis) next to the
+    matching spatial-domain image patch — ``block_size`` x ``block_size``
+    pixels centred on the patch centre, cut from the stored image — to
+    confirm the peak is a real lobe rather than a single noisy bin.  When
+    ``F`` holds no finite value (every patch gated by the density cut), an
+    empty figure titled accordingly is returned instead of raising on the
+    all-NaN argmax.
+
+    Args:
+        data: Single time-slice dataset with variable ``patch`` on dims
+            ``(px, py, kx, ky)`` (coords ``px``, ``py`` in km), variable
+            ``image`` on dims ``(x, y)`` (optionally with a leading ``time``
+            dim), and uniform ``x``/``y`` coordinates.
+
+    Returns:
+        A ``(fig, ax)`` tuple with ``ax`` a length-2 array of axes
+        ``(2-D power spectrum, image patch)`` for the caller to save or
+        annotate further.
     """
     Fv = np.asarray(data.F.values)
     if not (Fv.size and np.any(np.isfinite(Fv))):
@@ -220,12 +232,24 @@ def plot_peak_patch_spectrum(data):
         ax.set_title("all patches gated: no finite peak power")
         return fig, ax
     peak = data.F.argmax(dim=["px", "py"])
-    fig, ax = plt.subplots(figsize=(6, 5), tight_layout=True)
-    data.patch.isel(peak).plot(ax=ax)
-    ax.set_title(
-        f"peak patch @ px={float(data.px.isel(px=peak['px']).item()):.0f}, "
-        f"py={float(data.py.isel(py=peak['py']).item()):.0f}"
-    )
+    px_val = float(data.px.isel(px=peak["px"]).item())
+    py_val = float(data.py.isel(py=peak["py"]).item())
+    fig, ax = plt.subplots(1, 2, figsize=(12, 5), tight_layout=True)
+
+    spectrum = data.patch.isel(peak).squeeze(drop=True)
+    spectrum.plot(ax=ax[0], x="kx", y="ky")
+    ax[0].set_title(f"peak patch @ px={px_val:.0f}, py={py_val:.0f}")
+
+    block = spectrum.sizes["kx"]
+    half = block // 2
+    image = data.image.isel(time=0) if "time" in data.image.dims else data.image
+    ix = int(np.abs(np.asarray(image.x.values) - px_val).argmin())
+    iy = int(np.abs(np.asarray(image.y.values) - py_val).argmin())
+    image.isel(
+        x=slice(max(ix - half, 0), min(ix + half, image.sizes["x"])),
+        y=slice(max(iy - half, 0), min(iy + half, image.sizes["y"])),
+    ).plot(ax=ax[1], vmax=0.3)
+    ax[1].set_title("image patch")
     return fig, ax
 
 

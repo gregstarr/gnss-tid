@@ -31,7 +31,7 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
     Args:
         obs: Observation DataFrame returned by load_observations.
         rx: Receiver lookup DataFrame returned by load_observations.
-        cfg: Hydra DictConfig containing ``sample`` and ``focus`` sub-configs.
+        cfg: Hydra DictConfig containing ``event.sample`` and ``focus`` sub-configs.
         lat_limits: Tuple of (min_lat, max_lat) drawn from the event config.
         lon_limits: Tuple of (min_lon, max_lon) drawn from the event config.
 
@@ -82,8 +82,8 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         normalization=cfg.focus.normalization,
     )
     orchestration_kwargs = {
-        "window_size": cfg.sample.window,
-        "step": cfg.sample.step,
+        "window_size": cfg.event.sample.window,
+        "step": cfg.event.sample.step,
         "center_finder": center_finder,
         "heights": heights,
         "n_jobs": cfg.focus.n_jobs,

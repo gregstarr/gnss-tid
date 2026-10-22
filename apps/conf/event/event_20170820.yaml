@@ -14,3 +14,6 @@ q_thresh: 0.99
 stec_max: 30
 n_jobs: 12
 tec_name: dtec1
+sample:
+  window: 10
+  step: 10

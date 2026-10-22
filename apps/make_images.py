@@ -38,7 +38,7 @@ def _resolve_heights(cfg: DictConfig, time_windows) -> tuple[float | np.ndarray,
             raise ValueError(
                 f"heights_file '{cfg.heights_file}' has {heights.shape[0]} "
                 f"entries but {len(time_windows)} time windows were generated; "
-                f"check that sample.window and sample.step match the source run"
+                f"check that event.sample.window and event.sample.step match the source run"
             )
         if np.any(~np.isfinite(heights)):
             raise ValueError(
@@ -63,8 +63,8 @@ def _write_pngs(images: xarray.Dataset, out_dir: Path) -> None:
 def main(cfg: DictConfig):
     """Run the image-stack pipeline.
 
-    Loads observations, builds time windows from ``sample.window``/
-    ``sample.step``, resolves the IPP height(s) from config, initializes the
+    Loads observations, builds time windows from ``event.sample.window``/
+    ``event.sample.step``, resolves the IPP height(s) from config, initializes the
     image maker, and produces a per-time-window image stack saved to netCDF.
     Optionally also writes per-frame PNGs when ``write_pngs`` is true.
     """
@@ -87,7 +87,9 @@ def main(cfg: DictConfig):
 
         image_maker = hydra.utils.instantiate(cfg.image_maker)
 
-        time_windows = make_time_windows(obs["time"], cfg.sample.window, cfg.sample.step)
+        time_windows = make_time_windows(
+            obs["time"], cfg.event.sample.window, cfg.event.sample.step
+        )
         logger.info("built %d time windows", len(time_windows))
 
         heights, init_height = _resolve_heights(cfg, time_windows)

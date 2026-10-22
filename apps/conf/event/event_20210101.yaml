@@ -15,3 +15,6 @@ q_thresh: 0.99
 stec_max: null
 n_jobs: 12
 tec_name: dtec3
+sample:
+  window: 10
+  step: 20

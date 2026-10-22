@@ -13,9 +13,10 @@ n_jobs: 8
 height: 350
 heights_file: null
 
-sample:
-  window: 4
-  step: 2
+event:
+  sample:
+    window: 4
+    step: 2
 
 # When true, write one PNG per time step to `plots_dir`.
 write_pngs: false

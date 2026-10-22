@@ -1,7 +1,7 @@
 # Fast profiling preset: 3 time windows x 4 heights, single-threaded.
 # Pinned explicitly so the 3x4 shape holds even if other defaults change:
 # - files + time_limits: 30 min span on the 30 s-cadence 20210101 data yields
-#   exactly 3 windows with sample.window/step (8/20)
+#   exactly 3 windows with event.sample.window/step (8/20)
 # - height range: arange(100, 600, 125) = 4 heights
 event:
   files:
@@ -9,10 +9,9 @@ event:
   time_limits:
     - "20210101_140000"
     - "20210101_143000"
-
-sample:
-  window: 8
-  step: 20
+  sample:
+    window: 8
+    step: 20
 
 focus:
   n_jobs: 1
