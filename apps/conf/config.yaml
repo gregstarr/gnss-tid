@@ -7,11 +7,6 @@ defaults:
 
 output_fn: "autofocus.h5"
 
-event:
-  sample:
-    window: 10
-    step: 20
-
 hydra:
   job:
     chdir: true

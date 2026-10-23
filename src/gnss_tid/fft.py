@@ -6,6 +6,7 @@ wavenumber-grid generation between the two callers.
 """
 
 from collections.abc import Sequence
+from typing import Literal
 
 import dask.array as da
 import numpy as np
@@ -74,6 +75,68 @@ def make_patches(img: xr.DataArray, block_size: int, step_size: int) -> xr.DataA
     )
 
 
+def zscore(data: xr.DataArray, dims: str | Sequence[str]) -> xr.DataArray:
+    """Z-score a DataArray along dims, mapping zero standard deviation to zero.
+
+    Constant regions (standard deviation exactly zero — e.g. fully-void
+    patches after the density cut) are mapped to zero instead of dividing by
+    zero, so the result stays finite.
+
+    Args:
+        data: Input DataArray.
+        dims: Dimension or sequence of dimensions over which the mean and
+            standard deviation are computed.
+
+    Returns:
+        A DataArray with the same dims and coordinates, holding
+        ``(data - mean) / std`` where ``std > 0`` and ``0.0`` where
+        ``std == 0``.
+    """
+    std = data.std(dims)
+    valid = std > 0
+    mu = data.mean(dims)
+    return xr.where(valid, (data - mu) / std.where(valid), 0.0)
+
+
+def prepare_patch_image(
+    image: xr.DataArray,
+    density: xr.DataArray | None = None,
+    density_thresh: float | None = None,
+    normalization: Literal["image", "patch"] | None = None,
+) -> tuple[xr.DataArray, xr.DataArray | None]:
+    """Apply the density cut and image normalization preceding patch FFTs.
+
+    Single source of truth for the preprocessing that
+    :func:`gnss_tid.spectral.compute_patch_spectra` applies before extracting
+    and FFT-ing patches; diagnostic plots that must display the exact
+    pre-FFT patch reuse this function instead of reimplementing it.
+
+    Args:
+        image: 2-D DataArray with dims ``x`` and ``y``.
+        density: DataArray on the same dims as ``image``, or ``None``.
+        density_thresh: Minimum density for a pixel to enter the patch FFT;
+            pixels at or below the threshold are cut. ``None`` (default)
+            applies no cut.
+        normalization: ``"image"`` z-scores the cut, zero-filled image;
+            ``None`` or ``"patch"`` leaves amplitudes unchanged here
+            (``"patch"`` z-scoring happens per extracted block, after
+            :func:`make_patches`).
+
+    Returns:
+        A 2-tuple ``(prepared, cut)``: ``prepared`` is the zero-filled (and,
+        when requested, z-scored) image ready for :func:`make_patches`, and
+        ``cut`` is the un-filled cut image (NaN where cut) when a cut was
+        applied, else ``None``.
+    """
+    cut = None
+    if density_thresh is not None and density is not None:
+        cut = image.where(density > density_thresh)
+        image = cut.fillna(0)
+    if normalization == "image":
+        image = zscore(image, ("x", "y"))
+    return image, cut
+
+
 def make_wavenum_grid(
     Nfft: int,
     hres: float,
@@ -98,13 +161,13 @@ def make_wavenum_grid(
     return wavenum.astype(dtype)
 
 
-def fft_patches(
-    patches: xr.DataArray | da.Array | np.ndarray,
+def fft_patches[T: (xr.DataArray, da.Array, np.ndarray)](
+    patches: T,
     window: np.ndarray,
     *,
     Nfft: int,
     shift: bool = False,
-) -> xr.DataArray | da.Array | np.ndarray:
+) -> T:
     """2-D FFT of windowed patches with optional zero-padding and fftshift.
 
     Dispatches on input type:
@@ -160,4 +223,6 @@ __all__: Sequence[str] = [
     "make_kaiser_2d",
     "make_patches",
     "make_wavenum_grid",
+    "prepare_patch_image",
+    "zscore",
 ]

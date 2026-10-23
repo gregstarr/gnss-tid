@@ -7,6 +7,7 @@ from scipy.ndimage import maximum_filter1d
 from tqdm import autonotebook
 
 from .center_finding import find_center, find_center_grid_search, find_center_huber
+from .fft import make_patches, prepare_patch_image, zscore
 
 
 def _get_masked_image(data, density_thresh):
@@ -43,8 +44,8 @@ def _mark_max_patch(ax, data, label=None):
         "o",
         mfc="none",
         mec="red",
-        ms=14,
-        mew=2,
+        ms=16,
+        mew=2.5,
         label=label,
     )
 
@@ -203,14 +204,24 @@ def plot_density_map(data):
     return fig, ax
 
 
-def plot_peak_patch_spectrum(data):
-    """2-D power spectrum and matching image patch of the strongest patch.
+def plot_peak_patch_spectrum(
+    data, window=None, normalization=None, density_thresh=None, block_step=None
+):
+    """2-D power spectrum and matching pre-FFT image patch of the strongest patch.
 
     Picks the ``(px, py)`` location with maximum ``F`` and shows its full
     ``(kx, ky)`` spectrum (``kx`` on the horizontal axis) next to the
     matching spatial-domain image patch — ``block_size`` x ``block_size``
-    pixels centred on the patch centre, cut from the stored image — to
-    confirm the peak is a real lobe rather than a single noisy bin.  When
+    pixels centred on the patch centre — to confirm the peak is a real lobe
+    rather than a single noisy bin.  When ``block_step`` is given the patch
+    is rebuilt through the shared
+    :func:`gnss_tid.fft.prepare_patch_image` + :func:`gnss_tid.fft.make_patches`
+    path with the same density cut, normalization and FFT windowing that
+    :func:`gnss_tid.spectral.compute_patch_spectra` applied before the FFT,
+    so the displayed patch is the FFT input by construction; without
+    ``block_step`` the raw stored-image block is shown instead.  The patch
+    subplot uses robust automatic symmetric colour limits, ± the 99th
+    percentile of the absolute patch values, with a diverging colormap.  When
     ``F`` holds no finite value (every patch gated by the density cut), an
     empty figure titled accordingly is returned instead of raising on the
     all-NaN argmax.
@@ -219,7 +230,26 @@ def plot_peak_patch_spectrum(data):
         data: Single time-slice dataset with variable ``patch`` on dims
             ``(px, py, kx, ky)`` (coords ``px``, ``py`` in km), variable
             ``image`` on dims ``(x, y)`` (optionally with a leading ``time``
-            dim), and uniform ``x``/``y`` coordinates.
+            dim), optionally variable ``density`` on the same image dims,
+            and uniform ``x``/``y`` coordinates.
+        window: FFT windowing array with ``block_size**2`` elements (shape
+            ``(1, 1, block_size, block_size)`` or ``(block_size,
+            block_size)``) multiplied onto the displayed patch, matching the
+            window used for the spectra; ``None`` (default) displays the
+            unwindowed patch.
+        normalization: Normalization applied to the displayed patch,
+            ``"image"`` z-scores the full image, ``"patch"`` z-scores the
+            extracted block, and ``None`` (default) preserves raw amplitudes;
+            should match the mode used to compute the spectra.
+        density_thresh: Minimum ``density`` for a pixel to appear in the
+            displayed patch (pixels at or below the threshold are
+            zero-filled, matching the spectra); ``None`` (default) applies
+            no cut.
+        block_step: Stride between patch centres in pixels, matching the
+            spectra; required to rebuild the pre-FFT patch (raising
+            ``ValueError`` if ``window``, ``normalization`` or
+            ``density_thresh`` is set without it).  ``None`` (default)
+            displays the raw stored-image block only.
 
     Returns:
         A ``(fig, ax)`` tuple with ``ax`` a length-2 array of axes
@@ -241,15 +271,48 @@ def plot_peak_patch_spectrum(data):
     ax[0].set_title(f"peak patch @ px={px_val:.0f}, py={py_val:.0f}")
 
     block = spectrum.sizes["kx"]
-    half = block // 2
     image = data.image.isel(time=0) if "time" in data.image.dims else data.image
-    ix = int(np.abs(np.asarray(image.x.values) - px_val).argmin())
-    iy = int(np.abs(np.asarray(image.y.values) - py_val).argmin())
-    image.isel(
-        x=slice(max(ix - half, 0), min(ix + half, image.sizes["x"])),
-        y=slice(max(iy - half, 0), min(iy + half, image.sizes["y"])),
-    ).plot(ax=ax[1], vmax=0.3)
-    ax[1].set_title("image patch")
+    preprocess = (
+        window is not None or normalization is not None or density_thresh is not None
+    )
+    if block_step is None:
+        if preprocess:
+            raise ValueError(
+                "block_step is required to apply window, normalization or "
+                "density_thresh to the displayed patch"
+            )
+        half = block // 2
+        ix = int(np.abs(np.asarray(image.x.values) - px_val).argmin())
+        iy = int(np.abs(np.asarray(image.y.values) - py_val).argmin())
+        patch = image.isel(
+            x=slice(max(ix - half, 0), min(ix + half, image.sizes["x"])),
+            y=slice(max(iy - half, 0), min(iy + half, image.sizes["y"])),
+        )
+    else:
+        density = None
+        if density_thresh is not None and "density" in data:
+            density = data.density
+            if "time" in density.dims:
+                density = density.isel(time=0)
+        prepared, _ = prepare_patch_image(image, density, density_thresh, normalization)
+        patch = make_patches(prepared, block, block_step).sel(px=px_val, py=py_val)
+        if normalization == "patch":
+            patch = zscore(patch, tuple(patch.dims))
+        if window is not None:
+            w = np.asarray(window, dtype=float).reshape(block, block)
+            patch = patch * xarray.DataArray(w.T, dims=tuple(patch.dims))
+    patch_vals = np.asarray(patch.values, dtype=float)
+    lim = float(np.nanpercentile(np.abs(patch_vals), 99))
+    if np.isfinite(lim) and lim > 0:
+        patch.plot(ax=ax[1], vmin=-lim, vmax=lim, cmap="bwr")
+    else:
+        patch.plot(ax=ax[1])
+    title = "image patch"
+    if normalization is not None:
+        title += f" ({normalization} z-scored)"
+    if window is not None:
+        title += ", windowed"
+    ax[1].set_title(title)
     return fig, ax
 
 
@@ -278,7 +341,7 @@ def plot_center_finder(data, density_thresh=None):
     cg, dw = find_center_grid_search(pts, vectors, weights, data.x.values, data.y.values)
     XD, YD = np.meshgrid(data.x.values, data.y.values)
 
-    init_slice = data.isel(time=data.objective.argmax())
+    init_slice = data.isel(time=int(data.objective.argmax(dim="time")))
 
     fig, ax = plt.subplots(1, 2, tight_layout=True, figsize=(12, 5))
     plot_patches(init_slice, ax=ax[0], img=True, density_thresh=density_thresh)
@@ -396,13 +459,12 @@ def make_animation(
         None; writes the animation to ``save_fn``.
     """
     with plt.style.context("bmh"):
-        layout = [
-            ["height", "objective"],
-            ["power", "power"],
-            ["map", "map"],
-        ]
         fig, ax = plt.subplot_mosaic(
-            layout,
+            [
+                ["height", "objective"],
+                ["power", "power"],
+                ["map", "map"],
+            ],
             figsize=(10, 10),
             height_ratios=[5, 10, 10],
             tight_layout=True,

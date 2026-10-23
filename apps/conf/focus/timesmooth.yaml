@@ -3,15 +3,15 @@ defaults:
 
 center_finder: null
 
-height_min: 100
-height_max: 600
+height_min: 120
+height_max: 660
 height_step: 10
-block_size: 32
-block_step: 16
-kaiser_beta: 2
+block_size: 64
+block_step: 32
+kaiser_beta: 4
 logscale_objective: true
 density_thresh: 2
 min_patch_coverage: 0.4
-normalization: patch
+normalization: image
 time_window: 15
 n_jobs: 12

@@ -1,4 +1,5 @@
 import logging
+import os
 import traceback
 
 import hydra
@@ -10,6 +11,8 @@ from gnss_tid.fft import make_kaiser_2d
 from gnss_tid.plotting import make_animation
 from gnss_tid.pointdata import load_observations
 from gnss_tid.spectral import SpectralConfig, run_spectral_focusing
+
+os.environ.setdefault("LOKY_MAX_MEMORY_LEAK_SIZE", "2e9")
 
 logger = logging.getLogger(__name__)
 

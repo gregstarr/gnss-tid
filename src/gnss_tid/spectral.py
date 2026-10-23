@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 
 from .center_finding import run_smoothed_center_finder
 from .coords import Local2D
-from .fft import fft_patches, make_patches, make_wavenum_grid
+from .fft import fft_patches, make_patches, make_wavenum_grid, prepare_patch_image, zscore
 from .image import ImageMakerBase, generate_image
 from .parallel_logging import WorkerChannel, worker_channels
 from .plotting import (
@@ -96,7 +96,7 @@ def compute_patch_spectra(
     img: xarray.Dataset,
     block_size: int,
     block_step: int,
-    window: xarray.DataArray,
+    window: np.ndarray,
     density_thresh: float | None = None,
     normalization: Literal["image", "patch"] | None = None,
 ) -> xarray.Dataset:
@@ -154,27 +154,20 @@ def compute_patch_spectra(
         )
     hres = float(np.diff(img.x.values).mean())
     wavenum = make_wavenum_grid(block_size, hres, shift=True)
-    image = img.image
+    image, cut = prepare_patch_image(
+        img.image,
+        img.density if "density" in img else None,
+        density_thresh,
+        normalization,
+    )
     coverage = None
-    if density_thresh is not None and "density" in img:
-        cut = image.where(img.density > density_thresh)
+    if cut is not None:
         coverage = make_patches(
             cut.notnull().astype("float32"), block_size, block_step
         ).mean(("kx", "ky"))
-        image = cut.fillna(0)
-    if normalization == "image":
-        std = image.std(("x", "y"))
-        image = xarray.where(
-            std > 0, (image - image.mean(("x", "y"))) / std.where(std > 0), 0.0
-        )
     patches = make_patches(image, block_size, block_step)
     if normalization == "patch":
-        std = patches.std(("kx", "ky"))
-        patches = xarray.where(
-            std > 0,
-            (patches - patches.mean(("kx", "ky"))) / std.where(std > 0),
-            0.0,
-        )
+        patches = zscore(patches, ("kx", "ky"))
     F = fft_patches(patches, window, Nfft=block_size, shift=True)
     spectra = (abs(F) ** 2).assign_coords(kx=wavenum, ky=wavenum)
     out = xarray.Dataset({"patch": spectra})
@@ -441,7 +434,7 @@ def _select_best_height_for_slice(
         if data_all is None:
             return None
         summary = extract_patch_peaks(data_all, min_coverage=cfg.min_patch_coverage)
-        best_idx = int(summary.objective.argmax())
+        best_idx = int(summary.objective.argmax(dim="height"))
         best_height = float(heights[best_idx])
         best_slice = (
             data_all.isel(height=best_idx)
@@ -676,8 +669,10 @@ def _focus_per_slice(
 
     Returns:
         Dataset with image and density on ``(time, x, y)``, patch spectra on
-        ``(time, py, px, kx, ky)``, and selected height and objective on
-        ``(time,)``. Failed slices are reindexed to missing values.
+        ``(time, py, px, kx, ky)``, selected height and objective on
+        ``(time,)``, and the unsmoothed objective surface
+        ``objective_surface`` on ``(time, candidate_height)``.  Failed slices
+        are reindexed to missing values.
     """
     logger.info("run_spectral_focusing: single pass (no smoothing), n_jobs=%d", n_jobs)
     total = len(time_windows) * len(heights)
@@ -699,7 +694,9 @@ def _focus_per_slice(
 
     obj_surface = xarray.concat(per_height_objs, dim="time").reindex(time=times)
     _save_objective_plots(obj_surface, data_focused.height)
-    return data_focused
+    return data_focused.assign(
+        objective_surface=obj_surface.rename(height="candidate_height")
+    )
 
 
 def _focus_with_time_smoothing(
@@ -733,9 +730,11 @@ def _focus_with_time_smoothing(
 
     Returns:
         Dataset with image and density on ``(time, x, y)``, patch spectra on
-        ``(time, py, px, kx, ky)``, both smoothed height/objective tracks on
-        ``(time,)``, and alternative-track image/density on ``(time, x, y)``.
-        Dimension coordinates are inherited from the image and spectral grids.
+        ``(time, py, px, kx, ky)``, the unsmoothed objective surface
+        ``objective_surface`` on ``(time, candidate_height)``, both smoothed
+        height/objective tracks on ``(time,)``, and alternative-track
+        image/density on ``(time, x, y)``.  Dimension coordinates are
+        inherited from the image and spectral grids.
     """
     # First pass — objectives only (images discarded to save memory)
     logger.info("run_spectral_focusing: first pass (objectives), n_jobs=%d", n_jobs)
@@ -846,6 +845,7 @@ def _focus_with_time_smoothing(
                 logger.warning("run_spectral_focusing: alt pass produced no valid slices")
 
         extras = {
+            "objective_surface": obj_data.rename(height="candidate_height"),
             "objective_smoothed_linear": focus_linear.reset_coords(drop=True),
             "objective_smoothed_log": focus_log.reset_coords(drop=True),
             "height_linear": focus_linear.height.reset_coords(drop=True),
@@ -884,112 +884,56 @@ def run_spectral_focusing(
     time_window: int = 1,
     center_finder: Callable | None = None,
 ) -> xarray.Dataset:
-    """Unified spectral focusing pipeline.
+    """Run the spectral focusing pipeline over sliding time windows.
 
-    Orchestrates spectral focusing over a sequence of time windows in two modes
-    depending on ``time_window``:
+    For each window, images and FFT-patch objectives are computed at every
+    candidate height and the best height is selected.  With ``time_window=1``
+    the selection is made immediately (single pass).  With ``time_window>1``
+    the objective surface is first smoothed over time — an arithmetic mean of
+    the linear objective and a geometric mean of log10 — a height track is
+    selected from each reduction, and images are reconstructed at both
+    tracks; the track chosen by ``cfg.logscale_objective`` becomes the main
+    sequence.
 
-    **Single-pass** (``time_window=1``):
-
-    1. **Init**: find the time window with the most data and initialize the
-       image maker's interpolation grid.
-    2. **Single pass**: for each time window, compute images and FFT-patch
-       objectives at all candidate heights, then immediately select the height
-       with the highest objective.  No smoothing is applied.
-
-    **Two-pass** (``time_window>1``):
-
-    1. **Init**: same as above.
-    2. **First pass**: for each time window compute only the per-height FFT
-       objectives (images are discarded to save memory).
-    3. **Height smoothing**: apply both rolling reductions over time to the
-       objective surface — an arithmetic mean of the linear objective and a
-       geometric mean of log10 — selecting one height track per reduction.
-       ``logscale_objective`` picks the track used for the main sequence.
-    4. **Second pass**: for each time window reconstruct the image and FFT
-       patches at the selected focus height, plus an image-only
-       reconstruction at the alternative track's heights.
-
-    When ``cfg.density_thresh`` is set, the patch spectra are computed on a
-    density-cut, zero-filled copy of the image and peak powers from patches
-    whose coverage (fraction of pixels above ``cfg.density_thresh``) falls
-    below ``cfg.min_patch_coverage`` are gated to NaN, so the objective, the
-    height selection and the center-finding seed only see data-supported
-    patches; the stored ``image`` stays unmasked.  ``cfg.density_thresh=None``
-    (the dataclass default) disables the cut and the gate.
-
-    ``cfg.normalization`` may z-score each image (``"image"``) or each patch
-    (``"patch"``) before its FFT; ``None`` leaves raw amplitudes unchanged.
-    This scaling affects only patch spectra, never the stored images.
-
-    Observation identifiers ``rx`` and ``sv`` are converted to categoricals
-    on a run-local DataFrame without changing the caller's observations.
-    Large numeric, datetime, and categorical-code arrays are automatically
-    shared with process workers through joblib's read-only input memmaps.
-    Worker results are returned normally, not through shared output buffers.
-
-    Both modes optionally finish with a global center-finding step that fits
-    source parameters jointly across all times on the
-    ``logscale_objective``-selected sequence; the center-finding
-    initialization window is the time with the highest raw linear objective.
-    The step runs only when ``center_finder`` is provided; when
-    ``center_finder=None`` center finding is skipped (logged at INFO level)
-    and the returned dataset has no ``center``, ``wavelength``, ``offset`` or
-    ``phase`` variables.
+    Image, FFT, density-gate, and normalization settings come from ``cfg``;
+    see :class:`SpectralConfig` for their semantics.
 
     Args:
-        cfg: Shared spectral configuration (observations, receiver table,
-            image maker, FFT-block geometry, windowing, region bounds, TEC
-            variable name, patch density gate, and normalization mode).  See
-            :class:`SpectralConfig` for fields.
+        cfg: Shared spectral configuration.
         window_size: Number of unique time steps per sliding window.
         step: Stride (in time steps) between consecutive windows.
-        heights: Array of IPP heights (km) to search.
+        heights: Candidate IPP heights (km) to search.
         n_jobs: Number of parallel worker processes.
-        time_window: Rolling-mean window length (in time steps) applied to the
-            height-objective surface.  ``1`` disables smoothing (single-pass
-            mode).  Default ``1``.
-        center_finder: Callable ``(c0, w0, x, y, image) -> dict`` used for
-            global source-parameter estimation.  ``None`` skips center
-            finding entirely.  Default ``None``.
+        time_window: Rolling-mean window length (time steps) applied to the
+            objective surface; ``1`` disables smoothing.  Default ``1``.
+        center_finder: Callable ``(c0, w0, x, y, image) -> dict`` for global
+            source-parameter estimation; ``None`` skips center finding.
 
     Returns:
-        An ``xarray.Dataset`` with dimensions ``(time,)`` and variables:
+        An ``xarray.Dataset`` with variables:
 
-        - ``image`` ``(time, x, y)``: gridded TEC image at the focus height
-          selected by the ``logscale_objective`` smoothing (two-pass mode).
-        - ``patch`` ``(time, px, py, kx, ky)``: FFT patch spectra (computed on
-          the density-cut, zero-filled image when ``cfg.density_thresh`` is
-          set; ungated raw diagnostics).
-        - ``patch_coverage`` ``(time, px, py)``: fraction of each patch's
-          pixels above ``cfg.density_thresh`` (only present when the density
-          cut is applied).
-        - ``F``, ``Fx``, ``Fy`` ``(time, px, py)``: peak power and wavenumbers
-          (NaN where the patch coverage falls below
-          ``cfg.min_patch_coverage`` when the density cut applies).
-        - ``objective`` ``(time,)``: summed peak power at the selected heights
-          (linear power; NaN-skipping, so gated patches are excluded; argmax
-          over this picks the initialization window).
-        - ``height`` ``(time,)``: focus height (km) of the main sequence.
-        - ``objective_smoothed_linear``, ``objective_smoothed_log`` ``(time,)``:
-          both smoothed objectives at their respective selected heights
-          (two-pass mode only; linear power for the arithmetic-mean track,
-          log10 units for the geometric-mean track).
-        - ``height_linear``, ``height_log`` ``(time,)``: height tracks selected
-          by each smoothing (two-pass mode only).
-        - ``image_linear``/``image_log``, ``density_linear``/``density_log``
-          ``(time, x, y)``: image sequence at the height track not chosen by
-          ``logscale_objective`` (two-pass mode only; the suffix names that
-          track's smoothing, and the chosen track is stored as
+        - ``image``, ``density`` ``(time, x, y)``: TEC image and pixel density
+          at the selected focus height.
+        - ``patch`` ``(time, py, px, kx, ky)``: FFT patch spectra (linear
+          power; wavenumbers in cycles km⁻¹).
+        - ``patch_coverage`` ``(time, py, px)``: fraction of patch pixels
+          above ``cfg.density_thresh`` (only when the density cut applies).
+        - ``F``, ``Fx``, ``Fy`` ``(time, py, px)``: peak power and wavenumbers
+          (NaN where density-gated).
+        - ``objective`` ``(time,)``: summed peak power at the selected height.
+        - ``objective_surface`` ``(time, candidate_height)``: unsmoothed
+          per-height objective (both modes).
+        - ``height`` ``(time,)``: selected focus height (km).
+        - ``objective_smoothed_linear``, ``objective_smoothed_log``,
+          ``height_linear``, ``height_log`` ``(time,)``: the two smoothed
+          reductions and their height tracks (two-pass mode only).
+        - ``image_linear``, ``image_log``, ``density_linear``,
+          ``density_log`` ``(time, x, y)``: image and density at the other
+          height track (two-pass mode only; the selected track is stored as
           ``image``/``density``).
-        - ``center`` ``(ci,)``: estimated source center ``[x, y]`` (km, global;
-          only present when center finding runs).
-        - ``wavelength`` ``(time,)``: estimated horizontal wavelength (km; only
-          present when center finding runs).
-        - ``offset`` ``(time,)``: estimated DC offset (only present when center
-          finding runs).
-        - ``phase`` ``(time,)``: estimated wave phase (rad; only present when
-          center finding runs).
+        - ``center`` ``(ci,)``, ``wavelength``, ``offset``, ``phase``
+          ``(time,)``: center-finder outputs (only when ``center_finder`` is
+          provided).
 
         Attributes include ``coord_center`` as ``(mean_lat, mean_lon)``.
     """
@@ -1014,7 +958,7 @@ def run_spectral_focusing(
             time_windows, times, heights, cfg, n_jobs, time_window
         )
 
-    init_slice = data_focused.isel(time=data_focused.objective.argmax())
+    init_slice = data_focused.isel(time=int(data_focused.objective.argmax(dim="time")))
 
     # Persist diagnostic inputs before plotting so they survive plot failures.
     # init_slice.reset_coords().to_netcdf("plots/init_slice.nc")
@@ -1035,7 +979,13 @@ def run_spectral_focusing(
     fig.savefig("plots/density.png")
     plt.close(fig)
 
-    fig, _ = plot_peak_patch_spectrum(init_slice)
+    fig, _ = plot_peak_patch_spectrum(
+        init_slice,
+        window=cfg.window,
+        normalization=cfg.normalization,
+        density_thresh=cfg.density_thresh,
+        block_step=cfg.block_step,
+    )
     fig.savefig("plots/peak_patch.png")
     plt.close(fig)
 

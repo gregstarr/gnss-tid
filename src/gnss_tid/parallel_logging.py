@@ -69,6 +69,12 @@ class WorkerChannel:
     progress_queue: Any = None
 
     def __enter__(self) -> "WorkerChannel":
+        """Attach the worker-side queue handler.
+
+        With a log queue, creates a ``worker <pid>`` logger at INFO level
+        with a ``QueueHandler`` forwarding records to the parent-side queue;
+        without one, the channel stays in its module-logger fallback state.
+        """
         if self.log_queue is not None:
             self._wlog = logging.getLogger(f"worker {getpid()}")
             self._handler = QueueHandler(self.log_queue)
@@ -77,6 +83,7 @@ class WorkerChannel:
         return self
 
     def __exit__(self, *_exc) -> None:
+        """Remove the queue handler, restoring module-logger fallback."""
         handler = getattr(self, "_handler", None)
         if handler is not None:
             self._wlog.removeHandler(handler)
@@ -84,15 +91,36 @@ class WorkerChannel:
             self._handler = None
 
     def _logger(self) -> logging.Logger:
+        """Return the entered channel's worker logger, else the module logger."""
         return getattr(self, "_wlog", None) or logger
 
     def info(self, msg: str, *args: Any) -> None:
+        """Emit an INFO record through the channel's logger.
+
+        Args:
+            msg: Message or ``%``-style format string.
+            *args: Format arguments substituted into ``msg``.
+        """
         self._logger().info(msg, *args)
 
     def warning(self, msg: str, *args: Any) -> None:
+        """Emit a WARNING record through the channel's logger.
+
+        Args:
+            msg: Message or ``%``-style format string.
+            *args: Format arguments substituted into ``msg``.
+        """
         self._logger().warning(msg, *args)
 
     def report(self, n: int = 1) -> None:
+        """Advance the parent's progress bar by ``n`` ticks.
+
+        Args:
+            n: Number of ticks to add (default 1).
+
+        No-op without a progress queue (serial callers or ``pbar=False``),
+        so workers can report unconditionally.
+        """
         if self.progress_queue is None:
             return
         self.progress_queue.put(n)
@@ -123,11 +151,18 @@ def _spawn_manager_queue() -> Any:
 
 @contextmanager
 def log_queue_listener():
-    """Yield a multiprocessing log queue with a running ``QueueListener``.
+    """Run a parent-side ``QueueListener`` and yield its log queue.
 
-    The listener forwards records to whatever handlers are attached to the
-    root logger, respecting each handler's own level, and is stopped cleanly
-    on exit.
+    Workers put ``logging`` records on the returned queue (see
+    :meth:`WorkerChannel.__enter__`); the listener drains it and re-emits
+    each record through the handlers attached to the root logger, respecting
+    each handler's own level — e.g. a WARNING console stays quiet while an
+    INFO file handler still receives records.  The handler list is captured
+    when the listener starts, so handlers attached later are not picked up,
+    and the listener is stopped cleanly on exit.
+
+    Yields:
+        A multiprocessing queue accepting ``logging.LogRecord`` objects.
     """
     q = _spawn_manager_queue()
     listener = QueueListener(q, *logging.getLogger().handlers, respect_handler_level=True)
@@ -162,7 +197,7 @@ def _console_level() -> int:
 
 @contextmanager
 def progress_queue_listener(total: int, desc: str):
-    """Yield a multiprocessing queue whose tokens advance a ``tqdm`` bar.
+    """Drain worker progress ticks into a ``tqdm`` bar on the parent.
 
     Workers push integer tick counts onto the queue (see
     :meth:`WorkerChannel.report`).  A daemon thread on the parent process
@@ -170,9 +205,19 @@ def progress_queue_listener(total: int, desc: str):
     ``None`` sentinel stops the thread and the bar is closed.
 
     Console records during the bar's lifetime are emitted through the
-    tqdm-aware stand-in handler, which inherits the level of the console
-    handler it replaces so e.g. Hydra's ``console.level: WARNING`` keeps
-    INFO records off the console while the bar is live.
+    tqdm-aware stand-in handler installed by ``logging_redirect_tqdm``,
+    which copies formatter, stream and filters of the console handler it
+    replaces but not its level; the replaced handler's level is mirrored
+    onto the stand-in (see :func:`_console_level`) so e.g. Hydra's
+    ``console.level: WARNING`` keeps INFO records off the console while the
+    bar is live.
+
+    Args:
+        total: Progress bar total, matched against reported tick counts.
+        desc: Progress bar label.
+
+    Yields:
+        A multiprocessing queue accepting integer tick counts.
     """
     q = _spawn_manager_queue()
     level = _console_level()

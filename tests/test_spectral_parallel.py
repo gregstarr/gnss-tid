@@ -234,6 +234,7 @@ def test_pipeline_equivalent_n_jobs_1_and_2(time_window, tmp_path, monkeypatch):
         "Fx",
         "Fy",
         "objective",
+        "objective_surface",
         "height",
     }
     if time_window > 1:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -268,7 +269,7 @@ def _load_v1_file(
         Tuple of (observation dict, lookup dict), or None if no valid data
     """
     with h5py.File(file, "r") as handle:
-        az = np.asarray(handle["az"][:], dtype=float)
+        az = np.asarray(handle["az"][:], dtype=float) # type: ignore
         el = np.asarray(handle["el"][:], dtype=float)
         res = np.asarray(handle["res"][:], dtype=float)
         time = pd.to_datetime(handle["obstimes"][:], unit="s").to_numpy()
@@ -703,8 +704,8 @@ def get_data(
     rx: pd.DataFrame,
     time_spec: tuple[np.datetime64, np.datetime64] | TimeWindow,
     h: float,
-    lat_limits: list | None = None,
-    lon_limits: list | None = None,
+    lat_limits: Sequence[float] | None = None,
+    lon_limits: Sequence[float] | None = None,
     proj: Local2D | None = None,
 ) -> pd.DataFrame | None:
     """Return a per-slice observation DataFrame, optionally projected to local CS.
@@ -722,7 +723,7 @@ def get_data(
         return
 
     rx_positions = lookup_rx_location(df, rx)
-    df = project_to_ipp(df, rx_positions.loc[:, LOOKUP_GEO].values, h)
+    df = project_to_ipp(df, rx_positions.loc[:, LOOKUP_GEO].to_numpy(), h)
 
     if not (lat_limits is None and lon_limits is None):
         valid_lat = (
