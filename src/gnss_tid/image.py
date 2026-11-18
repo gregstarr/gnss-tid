@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 class ImageMakerBase(ABC):
     def __init__(self, hres, hp_freq=0.05, neighbor_radius=100.0, **kwargs):
+        """Store interpolation settings.
+
+        ``hp_freq`` is the spatial Butterworth high-pass cutoff; ``None``
+        bypasses the filter entirely (useful for controlled simulation
+        experiments). Existing real-data callers keep the ``0.05`` default
+        and their explicitly configured cutoffs.
+        """
         self.kwargs = kwargs
         self.hp_freq = hp_freq
         self.hres = hres
@@ -101,7 +108,8 @@ class ImageMakerBase(ABC):
 
         img = self._interpolate(x, y, tec).reshape(self.shape)
         img[np.isnan(img)] = 0
-        img = filters.butterworth(img, self.hp_freq, high_pass=True)
+        if self.hp_freq is not None:
+            img = filters.butterworth(img, self.hp_freq, high_pass=True)
         img = xarray.DataArray(img, coords=[self.yp, self.xp], dims=["y", "x"])
         w = self.get_data_density(x, y, self.neighbor_radius)
         return xarray.Dataset({"image": img, "density": w})

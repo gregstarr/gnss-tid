@@ -1,0 +1,88 @@
+# Real-GNSS smoke config: geometry from loaded observations.
+# Configure event files, projection, and availability policy for the run.
+defaults:
+  - client: laptop
+  - _self_
+
+nfft: 128
+block_size: 32
+step_size: 8
+norm: patch
+smooth_win: 9
+q_threshold: 0.95
+density_threshold: 5
+
+n_trials: 2
+batch_size: 2
+generation_batch_size: 2
+seed: 42
+reference_time: "2025-01-01T00:00:00"
+output_dtype: float32
+save: false
+
+wave_type: spherical
+
+scenario:
+  sources:
+    - wave:
+        type: planar
+        wavelength_km: 300
+        period_min: 30
+        direction_deg: 30
+        center_x_km: 0
+        center_y_km: 0
+        phase_rad: 0
+        amplitude_tecu: 1.0
+
+sampler:
+  type: real_gnss
+  files: []                     # observation file paths (required)
+  latitude_limits: [30, 50]
+  longitude_limits: [-115, -95]
+  time_limits: ["2025-01-01T00:00:00", "2025-01-01T02:00:00"]
+  el_min: 0
+  q_thresh: 0.99
+  n_jobs: 1
+  true_height_km: 350
+  availability: geometry        # geometry | observed
+  tec_column: dtec1
+  timestamp_tolerance_s: 0
+  start_time: "2025-01-01T00:00:00"
+  end_time: "2025-01-01T02:00:00"
+  cadence_s: 60
+  projection:
+    lat: 40.0
+    lon: -105.0
+    height_km: 350
+
+forward_model:
+  type: analytical
+
+noise:
+  std_tecu: null
+
+image:
+  image_maker:
+    _target_: gnss_tid.image.MetpyImageMaker
+    hres: 20
+    hp_freq: null
+    neighbor_radius: 100.0
+    interp_type: linear
+  hp_freq: null
+  reconstruction_height_km: 350
+  window: 1
+  step: 1
+  image_n_jobs: 1
+  latitude_limits: [30, 50]
+  longitude_limits: [-115, -95]
+
+output:
+  root: ./results
+  experiment_id: null
+
+hydra:
+  job_logging:
+    formatters:
+      simple:
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        fmt: "[%(asctime)s][%(name)s][%(levelname)s] %(message)s"
