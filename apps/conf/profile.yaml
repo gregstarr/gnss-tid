@@ -12,9 +12,8 @@ event:
   sample:
     window: 8
     step: 20
-
-focus:
-  n_jobs: 1
-  height_min: 100
-  height_max: 600
-  height_step: 125
+  focus:
+    n_jobs: 1
+    height_min: 100
+    height_max: 600
+    height_step: 125

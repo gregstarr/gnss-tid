@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
     """Build inputs for :func:`~gnss_tid.spectral.run_spectral_focusing`.
 
-    The ``focus.center_finder`` config group is optional: when it is null or
-    absent, no center finder is instantiated and ``center_finder=None`` is
-    passed through ``orchestration_kwargs``; the pipeline then skips center
+    The ``event.focus.center_finder`` config group is optional: when it is
+    null or absent, no center finder is instantiated and ``center_finder=None``
+    is passed through ``orchestration_kwargs``; the pipeline then skips center
     finding (logged at INFO level) and the result has no ``center``,
     ``wavelength``, ``offset`` or ``phase`` variables.
 
@@ -34,7 +34,8 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
     Args:
         obs: Observation DataFrame returned by load_observations.
         rx: Receiver lookup DataFrame returned by load_observations.
-        cfg: Hydra DictConfig containing ``event.sample`` and ``focus`` sub-configs.
+        cfg: Hydra DictConfig containing the ``event.focus`` sub-config (plus
+            ``event.sample`` and the other event keys).
         lat_limits: Tuple of (min_lat, max_lat) drawn from the event config.
         lon_limits: Tuple of (min_lon, max_lon) drawn from the event config.
 
@@ -46,14 +47,18 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         - ``orchestration_kwargs``: dict of the remaining keyword arguments
           accepted by :func:`~gnss_tid.spectral.run_spectral_focusing`.
     """
-    heights = np.arange(cfg.focus.height_min, cfg.focus.height_max, cfg.focus.height_step)
-    block_size = cfg.focus.block_size
-    window = make_kaiser_2d(block_size, cfg.focus.kaiser_beta).reshape(
+    heights = np.arange(
+        cfg.event.focus.height_min,
+        cfg.event.focus.height_max,
+        cfg.event.focus.height_step,
+    )
+    block_size = cfg.event.focus.block_size
+    window = make_kaiser_2d(block_size, cfg.event.focus.kaiser_beta).reshape(
         1, 1, block_size, block_size
     )
 
-    image_maker = hydra.utils.instantiate(cfg.focus.image_maker)
-    center_finder_cfg = cfg.focus.get("center_finder")
+    image_maker = hydra.utils.instantiate(cfg.event.focus.image_maker)
+    center_finder_cfg = cfg.event.focus.get("center_finder")
     center_finder = (
         hydra.utils.instantiate(center_finder_cfg)
         if center_finder_cfg is not None
@@ -74,23 +79,23 @@ def _build_pipeline_inputs(obs, rx, cfg: DictConfig, lat_limits, lon_limits):
         image_maker=image_maker,
         tec_name=cfg.event.tec_name,
         block_size=block_size,
-        block_step=cfg.focus.block_step,
+        block_step=cfg.event.focus.block_step,
         window=window,
-        logscale_objective=cfg.focus.logscale_objective,
+        logscale_objective=cfg.event.focus.logscale_objective,
         lat_limits=lat_limits,
         lon_limits=lon_limits,
         proj=proj,
-        density_thresh=cfg.focus.density_thresh,
-        min_patch_coverage=cfg.focus.min_patch_coverage,
-        normalization=cfg.focus.normalization,
+        density_thresh=cfg.event.focus.density_thresh,
+        min_patch_coverage=cfg.event.focus.min_patch_coverage,
+        normalization=cfg.event.focus.normalization,
     )
     orchestration_kwargs = {
         "window_size": cfg.event.sample.window,
         "step": cfg.event.sample.step,
         "center_finder": center_finder,
         "heights": heights,
-        "n_jobs": cfg.focus.n_jobs,
-        "time_window": cfg.focus.time_window,
+        "n_jobs": cfg.event.focus.n_jobs,
+        "time_window": cfg.event.focus.time_window,
     }
     return spectral_cfg, orchestration_kwargs
 
@@ -100,7 +105,7 @@ def main(cfg: DictConfig):
     """Run the autofocus spectral pipeline.
 
     Loads GNSS observations from the event config, builds all pipeline
-    components from the focus config, and calls
+    components from the ``event.focus`` config, and calls
     :func:`~gnss_tid.spectral.run_spectral_focusing`.
 
     The ``time_window`` config key controls height smoothing:
@@ -109,9 +114,9 @@ def main(cfg: DictConfig):
     mean over the objective surface (equivalent to the former
     ``smoothed_patch`` pipeline).
 
-    The ``focus.center_finder`` config group is optional: when it is null or
-    absent the pipeline skips center finding (logged at INFO level) and the
-    result has no ``center``, ``wavelength``, ``offset`` or ``phase``
+    The ``event.focus.center_finder`` config group is optional: when it is
+    null or absent the pipeline skips center finding (logged at INFO level)
+    and the result has no ``center``, ``wavelength``, ``offset`` or ``phase``
     variables.
 
     Args:
@@ -146,7 +151,7 @@ def main(cfg: DictConfig):
 
         logger.info("saving results to %s", cfg.output_fn)
         result.to_netcdf(cfg.output_fn)
-        make_animation(result, "event.gif", density_thresh=cfg.focus.density_thresh)
+        make_animation(result, "event.gif", density_thresh=cfg.event.focus.density_thresh)
     except Exception:
         logger.error("An error occurred:\n%s", traceback.format_exc())
         raise

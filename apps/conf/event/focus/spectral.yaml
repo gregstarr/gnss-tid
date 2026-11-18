@@ -12,6 +12,6 @@ logscale_objective: false
 n_jobs: 10
 tec_name: dtec1
 time_window: 1
-density_thresh: 20
+density_thresh: 2
 min_patch_coverage: 0.5
 normalization: null

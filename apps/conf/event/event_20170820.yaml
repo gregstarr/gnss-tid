@@ -1,3 +1,7 @@
+defaults:
+  - focus: timesmooth
+  - _self_
+
 files:
   - /disk1/tid/2017/0820/*.nc
 latitude_limits:

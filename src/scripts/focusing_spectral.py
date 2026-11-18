@@ -62,12 +62,14 @@ def plot_row(ax, data, img, blocks, step):
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg):
     points = hydra.utils.instantiate(cfg.event.pointdata)
-    focuser = hydra.utils.instantiate(cfg.focus)
+    focuser = hydra.utils.instantiate(cfg.event.focus)
 
     nrows = len(focuser.heights) // 4
     fig, ax = plt.subplots(nrows, 3, figsize=(20, 4 * nrows), tight_layout=True)
     title1 = "|".join([f"{k}={v}" for k, v in focuser.image_maker.kwargs.items()])
-    title2 = f"blk_size={cfg.focus.block_size}|blk_step={cfg.focus.block_step}"
+    title2 = (
+        f"blk_size={cfg.event.focus.block_size}|blk_step={cfg.event.focus.block_step}"
+    )
     ax[0, 0].set_title(title1)
     ax[0, 1].set_title(title2)
 

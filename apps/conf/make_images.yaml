@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - focus/image_maker@image_maker: rbf
+  - event/focus/image_maker@image_maker: rbf
   - event: 20150325_full
 
 output_fn: "images.h5"
